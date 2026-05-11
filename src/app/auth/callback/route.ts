@@ -12,6 +12,13 @@ export async function GET(request: NextRequest) {
     if (!error) {
       return NextResponse.redirect(`${origin}${next}`);
     }
+    console.error("[auth/callback] exchangeCodeForSession failed:", {
+      message: error.message,
+      status: error.status,
+      name: error.name,
+    });
+  } else {
+    console.error("[auth/callback] no code param in callback URL:", request.url);
   }
 
   return NextResponse.redirect(`${origin}/auth/auth-code-error`);
