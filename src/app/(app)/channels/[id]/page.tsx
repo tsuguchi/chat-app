@@ -33,6 +33,32 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
     .maybeSingle();
   const isMember = membership !== null;
 
+  // For DMs, build the display label from the other participants.
+  let headerTitle: string;
+  let headerSubtitle: string;
+  if (channel.type === "dm" || channel.type === "group_dm") {
+    const { data: otherMembers } = await supabase
+      .from("channel_members")
+      .select("profile:profiles!user_id(display_name)")
+      .eq("channel_id", id)
+      .neq("user_id", user.id);
+    const names = (otherMembers ?? [])
+      .map((r) => {
+        const profile = (
+          r as unknown as { profile: { display_name: string } | { display_name: string }[] }
+        ).profile;
+        return Array.isArray(profile)
+          ? (profile[0]?.display_name ?? "")
+          : (profile?.display_name ?? "");
+      })
+      .filter(Boolean);
+    headerTitle = names.length > 0 ? `💬 ${names.join(", ")}` : "💬 (自分のみ)";
+    headerSubtitle = channel.type === "dm" ? "ダイレクトメッセージ" : "グループ DM";
+  } else {
+    headerTitle = `# ${channel.name}`;
+    headerSubtitle = channel.type === "private" ? "プライベート" : "パブリック";
+  }
+
   const { data: messageRows } = await supabase
     .from("messages")
     .select("id, body, created_at, user_id")
@@ -54,14 +80,12 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
     initialProfiles = (profs ?? []) as ChatProfile[];
   }
 
-  const typeLabel = channel.type === "private" ? "プライベート" : "パブリック";
-
   return (
     <div className="flex h-screen flex-col">
       <header className="border-b border-gray-200 bg-white px-6 py-4">
         <div className="flex items-baseline gap-3">
-          <h1 className="text-lg font-semibold text-gray-900"># {channel.name}</h1>
-          <span className="text-xs text-gray-500">{typeLabel}</span>
+          <h1 className="text-lg font-semibold text-gray-900">{headerTitle}</h1>
+          <span className="text-xs text-gray-500">{headerSubtitle}</span>
         </div>
         {channel.description && <p className="mt-1 text-sm text-gray-600">{channel.description}</p>}
       </header>
