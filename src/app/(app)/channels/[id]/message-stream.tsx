@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { sendMessage } from "./actions";
 
@@ -30,11 +30,17 @@ export function MessageStream({
   const [profiles, setProfiles] = useState<Map<string, ChatProfile>>(
     () => new Map(initialProfiles.map((p) => [p.id, p])),
   );
+  const profilesRef = useRef(profiles);
+  useEffect(() => {
+    profilesRef.current = profiles;
+  }, [profiles]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const listEndRef = useRef<HTMLDivElement>(null);
-  const supabase = createClient();
+  // Stable client across renders. createBrowserClient is a singleton anyway,
+  // but useMemo also avoids re-running the subscription useEffect.
+  const supabase = useMemo(() => createClient(), []);
 
   // Auto-scroll to bottom on new messages.
   useEffect(() => {
@@ -43,40 +49,64 @@ export function MessageStream({
 
   // Realtime subscription for new messages in this channel.
   useEffect(() => {
-    const channel = supabase
-      .channel(`messages:channel:${channelId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `channel_id=eq.${channelId}`,
-        },
-        async (payload) => {
-          const row = payload.new as ChatMessage;
-          // Append, but skip if we already have it (e.g. our own optimistic echo).
-          setMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
+    let cancelled = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
 
-          // Fetch profile if we haven't seen this author yet.
-          if (!profiles.has(row.user_id)) {
-            const { data: prof } = await supabase
-              .from("profiles")
-              .select("id, display_name, avatar_url")
-              .eq("id", row.user_id)
-              .maybeSingle();
-            if (prof) {
-              setProfiles((prev) => new Map(prev).set(prof.id, prof));
+    (async () => {
+      // Ensure realtime has the current user's JWT so RLS-protected
+      // postgres_changes events on `messages` are delivered.
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (cancelled) return;
+      if (session?.access_token) {
+        await supabase.realtime.setAuth(session.access_token);
+        console.log("[realtime] auth set, user:", session.user.id);
+      } else {
+        console.warn("[realtime] no session — INSERT events will be blocked by RLS");
+      }
+
+      console.log("[realtime] subscribing to channel:", channelId);
+      channel = supabase
+        .channel(`messages:channel:${channelId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "messages",
+            filter: `channel_id=eq.${channelId}`,
+          },
+          async (payload) => {
+            console.log("[realtime] INSERT event received:", payload);
+            const row = payload.new as ChatMessage;
+            setMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
+
+            if (!profilesRef.current.has(row.user_id)) {
+              const { data: prof } = await supabase
+                .from("profiles")
+                .select("id, display_name, avatar_url")
+                .eq("id", row.user_id)
+                .maybeSingle();
+              if (prof) {
+                setProfiles((prev) => new Map(prev).set(prof.id, prof));
+              }
             }
-          }
-        },
-      )
-      .subscribe();
+          },
+        )
+        .subscribe((status, err) => {
+          console.log("[realtime] subscription status:", status, err ?? "");
+        });
+    })();
 
     return () => {
-      supabase.removeChannel(channel);
+      cancelled = true;
+      if (channel) {
+        console.log("[realtime] removing channel:", channelId);
+        supabase.removeChannel(channel);
+      }
     };
-  }, [channelId, supabase, profiles]);
+  }, [channelId, supabase]);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
