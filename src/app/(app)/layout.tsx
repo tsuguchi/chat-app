@@ -13,16 +13,29 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     redirect("/login");
   }
 
-  const { data: channels } = await supabase
-    .from("channels")
-    .select("id, type, name")
-    .in("type", ["public", "private"])
-    .eq("is_archived", false)
-    .order("type", { ascending: true })
-    .order("name", { ascending: true });
+  // Joined channels only: query through channel_members so non-joined public
+  // channels do not pollute the sidebar.
+  const { data: memberRows } = await supabase
+    .from("channel_members")
+    .select("channel:channels!inner(id, type, name, is_archived)")
+    .eq("user_id", user.id);
 
-  const publicChannels = (channels ?? []).filter((c) => c.type === "public");
-  const privateChannels = (channels ?? []).filter((c) => c.type === "private");
+  type SidebarChannel = { id: string; type: string; name: string | null };
+  const joined: SidebarChannel[] = (memberRows ?? [])
+    .map(
+      (r) =>
+        r.channel as unknown as {
+          id: string;
+          type: string;
+          name: string | null;
+          is_archived: boolean;
+        },
+    )
+    .filter((c) => !c.is_archived && (c.type === "public" || c.type === "private"))
+    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+
+  const publicChannels = joined.filter((c) => c.type === "public");
+  const privateChannels = joined.filter((c) => c.type === "private");
 
   return (
     <div className="flex min-h-screen bg-gray-50">
