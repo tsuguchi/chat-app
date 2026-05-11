@@ -34,6 +34,8 @@ yarn-error.log*
 
 # Environment files
 .env*
+!.env.local.example
+!.env.example
 
 # IDE
 .vscode/
