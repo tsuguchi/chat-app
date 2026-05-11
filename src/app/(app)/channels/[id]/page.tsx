@@ -59,15 +59,33 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
     headerSubtitle = channel.type === "private" ? "プライベート" : "パブリック";
   }
 
+  // Main channel view: top-level messages only. Replies live in thread panel.
   const { data: messageRows } = await supabase
     .from("messages")
-    .select("id, body, created_at, user_id")
+    .select("id, body, created_at, user_id, parent_message_id")
     .eq("channel_id", id)
+    .is("parent_message_id", null)
     .is("deleted_at", null)
     .order("created_at", { ascending: true })
     .limit(200);
 
   const initialMessages = (messageRows ?? []) as ChatMessage[];
+
+  // Compute reply counts for visible top-level messages.
+  const topIds = initialMessages.map((m) => m.id);
+  const initialReplyCounts: Record<string, number> = {};
+  if (topIds.length > 0) {
+    const { data: replyRows } = await supabase
+      .from("messages")
+      .select("parent_message_id")
+      .eq("channel_id", id)
+      .is("deleted_at", null)
+      .in("parent_message_id", topIds);
+    for (const r of replyRows ?? []) {
+      const pid = r.parent_message_id as string | null;
+      if (pid) initialReplyCounts[pid] = (initialReplyCounts[pid] ?? 0) + 1;
+    }
+  }
 
   // Pre-fetch profiles for all authors in the initial message set.
   const authorIds = Array.from(new Set(initialMessages.map((m) => m.user_id)));
@@ -95,6 +113,7 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
           channelId={channel.id}
           initialMessages={initialMessages}
           initialProfiles={initialProfiles}
+          initialReplyCounts={initialReplyCounts}
           currentUserId={user.id}
         />
       ) : (

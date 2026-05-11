@@ -4,7 +4,11 @@ import { createClient } from "@/lib/supabase/server";
 
 export type SendMessageResult = { ok: true } | { ok: false; error: string };
 
-export async function sendMessage(channelId: string, body: string): Promise<SendMessageResult> {
+export async function sendMessage(
+  channelId: string,
+  body: string,
+  parentMessageId: string | null = null,
+): Promise<SendMessageResult> {
   const text = body.trim();
   if (!text) return { ok: false, error: "メッセージを入力してください。" };
   if (text.length > 4000) return { ok: false, error: "メッセージが長すぎます (4000文字まで)。" };
@@ -18,6 +22,7 @@ export async function sendMessage(channelId: string, body: string): Promise<Send
   const { error } = await supabase.from("messages").insert({
     channel_id: channelId,
     user_id: user.id,
+    parent_message_id: parentMessageId,
     body: text,
   });
 
