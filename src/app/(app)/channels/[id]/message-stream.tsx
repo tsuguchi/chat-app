@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { sendMessage } from "./actions";
 
@@ -11,12 +11,14 @@ export type ChatMessage = {
   body: string;
   created_at: string;
   user_id: string;
+  parent_message_id: string | null;
 };
 
 type Props = {
   channelId: string;
   initialMessages: ChatMessage[];
   initialProfiles: ChatProfile[];
+  initialReplyCounts: Record<string, number>;
   currentUserId: string;
 };
 
@@ -24,6 +26,7 @@ export function MessageStream({
   channelId,
   initialMessages,
   initialProfiles,
+  initialReplyCounts,
   currentUserId,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
@@ -34,39 +37,30 @@ export function MessageStream({
   useEffect(() => {
     profilesRef.current = profiles;
   }, [profiles]);
-  const [draft, setDraft] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  const listEndRef = useRef<HTMLDivElement>(null);
-  // Stable client across renders. createBrowserClient is a singleton anyway,
-  // but useMemo also avoids re-running the subscription useEffect.
+
+  const [replyCounts, setReplyCounts] = useState<Record<string, number>>(initialReplyCounts);
+
+  const [threadParentId, setThreadParentId] = useState<string | null>(null);
+
+  // Stable client. createBrowserClient is a singleton; useMemo avoids tearing
+  // the subscription down on every render.
   const supabase = useMemo(() => createClient(), []);
 
-  // Auto-scroll to bottom on new messages.
-  useEffect(() => {
-    listEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  // Realtime subscription for new messages in this channel.
+  // Realtime subscription: route INSERTs to main list, reply counts, and/or
+  // the open thread panel based on parent_message_id.
   useEffect(() => {
     let cancelled = false;
     let channel: ReturnType<typeof supabase.channel> | null = null;
 
     (async () => {
-      // Ensure realtime has the current user's JWT so RLS-protected
-      // postgres_changes events on `messages` are delivered.
       const {
         data: { session },
       } = await supabase.auth.getSession();
       if (cancelled) return;
       if (session?.access_token) {
         await supabase.realtime.setAuth(session.access_token);
-        console.log("[realtime] auth set, user:", session.user.id);
-      } else {
-        console.warn("[realtime] no session — INSERT events will be blocked by RLS");
       }
 
-      console.log("[realtime] subscribing to channel:", channelId);
       channel = supabase
         .channel(`messages:channel:${channelId}`)
         .on(
@@ -78,10 +72,19 @@ export function MessageStream({
             filter: `channel_id=eq.${channelId}`,
           },
           async (payload) => {
-            console.log("[realtime] INSERT event received:", payload);
             const row = payload.new as ChatMessage;
-            setMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
+            if (row.parent_message_id) {
+              // Reply: bump reply count.
+              setReplyCounts((prev) => ({
+                ...prev,
+                [row.parent_message_id!]: (prev[row.parent_message_id!] ?? 0) + 1,
+              }));
+            } else {
+              // Top-level: append to main list (dedupe).
+              setMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
+            }
 
+            // Lazy-load author profile if unknown.
             if (!profilesRef.current.has(row.user_id)) {
               const { data: prof } = await supabase
                 .from("profiles")
@@ -94,19 +97,162 @@ export function MessageStream({
             }
           },
         )
-        .subscribe((status, err) => {
-          console.log("[realtime] subscription status:", status, err ?? "");
-        });
+        .subscribe();
     })();
 
     return () => {
       cancelled = true;
-      if (channel) {
-        console.log("[realtime] removing channel:", channelId);
-        supabase.removeChannel(channel);
-      }
+      if (channel) supabase.removeChannel(channel);
     };
   }, [channelId, supabase]);
+
+  const openThread = useCallback((parentId: string) => setThreadParentId(parentId), []);
+  const closeThread = useCallback(() => setThreadParentId(null), []);
+
+  return (
+    <div className="flex flex-1 overflow-hidden">
+      <div
+        className={`flex flex-col ${threadParentId ? "flex-1 border-r border-gray-200" : "flex-1"}`}
+      >
+        <MessageList
+          messages={messages}
+          profiles={profiles}
+          replyCounts={replyCounts}
+          currentUserId={currentUserId}
+          onOpenThread={openThread}
+        />
+        <Composer
+          channelId={channelId}
+          parentMessageId={null}
+          placeholder="メッセージを入力 (Enter で送信、Shift+Enter で改行)"
+        />
+      </div>
+
+      {threadParentId && (
+        <ThreadPanel
+          key={threadParentId}
+          channelId={channelId}
+          parentId={threadParentId}
+          profiles={profiles}
+          setProfiles={setProfiles}
+          currentUserId={currentUserId}
+          onClose={closeThread}
+        />
+      )}
+    </div>
+  );
+}
+
+function MessageList({
+  messages,
+  profiles,
+  replyCounts,
+  currentUserId,
+  onOpenThread,
+}: {
+  messages: ChatMessage[];
+  profiles: Map<string, ChatProfile>;
+  replyCounts: Record<string, number>;
+  currentUserId: string;
+  onOpenThread: (parentId: string) => void;
+}) {
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  return (
+    <div className="flex-1 overflow-y-auto bg-gray-50 px-6 py-4">
+      {messages.length === 0 ? (
+        <div className="flex h-full items-center justify-center text-sm text-gray-400">
+          まだメッセージがありません。最初の一通を送ってみましょう。
+        </div>
+      ) : (
+        <ul className="space-y-3">
+          {messages.map((m) => (
+            <MessageRow
+              key={m.id}
+              message={m}
+              profile={profiles.get(m.user_id) ?? null}
+              isMine={m.user_id === currentUserId}
+              replyCount={replyCounts[m.id] ?? 0}
+              onReply={() => onOpenThread(m.id)}
+            />
+          ))}
+        </ul>
+      )}
+      <div ref={endRef} />
+    </div>
+  );
+}
+
+function MessageRow({
+  message,
+  profile,
+  isMine,
+  replyCount,
+  onReply,
+}: {
+  message: ChatMessage;
+  profile: ChatProfile | null;
+  isMine: boolean;
+  replyCount: number;
+  onReply: () => void;
+}) {
+  return (
+    <li className="group flex gap-3">
+      <div className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
+        {(profile?.display_name ?? "?").slice(0, 1).toUpperCase()}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
+          <span className="text-sm font-semibold text-gray-900">
+            {profile?.display_name ?? "Unknown"}
+            {isMine && <span className="ml-1 text-xs text-gray-400">(you)</span>}
+          </span>
+          <time className="text-xs text-gray-400" dateTime={message.created_at}>
+            {new Date(message.created_at).toLocaleString("ja-JP", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </time>
+        </div>
+        <p className="whitespace-pre-wrap break-words text-sm text-gray-800">{message.body}</p>
+        <div className="mt-1 flex items-center gap-3 text-xs">
+          <button
+            type="button"
+            onClick={onReply}
+            className="text-gray-500 opacity-0 hover:text-blue-600 group-hover:opacity-100"
+          >
+            💬 返信
+          </button>
+          {replyCount > 0 && (
+            <button
+              type="button"
+              onClick={onReply}
+              className="font-medium text-blue-600 hover:underline"
+            >
+              返信 {replyCount} 件
+            </button>
+          )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function Composer({
+  channelId,
+  parentMessageId,
+  placeholder,
+}: {
+  channelId: string;
+  parentMessageId: string | null;
+  placeholder: string;
+}) {
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -114,7 +260,7 @@ export function MessageStream({
     const body = draft;
     setSending(true);
     setError(null);
-    const result = await sendMessage(channelId, body);
+    const result = await sendMessage(channelId, body, parentMessageId);
     setSending(false);
     if (result.ok) {
       setDraft("");
@@ -124,77 +270,232 @@ export function MessageStream({
   }
 
   return (
-    <>
-      <div className="flex-1 overflow-y-auto bg-gray-50 px-6 py-4">
-        {messages.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-gray-400">
-            まだメッセージがありません。最初の一通を送ってみましょう。
+    <form onSubmit={handleSubmit} className="border-t border-gray-200 bg-white px-4 py-3">
+      {error && (
+        <div className="mb-2 rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+          {error}
+        </div>
+      )}
+      <div className="flex items-end gap-2">
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              (e.currentTarget.form as HTMLFormElement | null)?.requestSubmit();
+            }
+          }}
+          rows={2}
+          maxLength={4000}
+          placeholder={placeholder}
+          className="flex-1 resize-none rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        />
+        <button
+          type="submit"
+          disabled={sending || !draft.trim()}
+          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+        >
+          送信
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ThreadPanel({
+  channelId,
+  parentId,
+  profiles,
+  setProfiles,
+  currentUserId,
+  onClose,
+}: {
+  channelId: string;
+  parentId: string;
+  profiles: Map<string, ChatProfile>;
+  setProfiles: React.Dispatch<React.SetStateAction<Map<string, ChatProfile>>>;
+  currentUserId: string;
+  onClose: () => void;
+}) {
+  const [parent, setParent] = useState<ChatMessage | null>(null);
+  const [replies, setReplies] = useState<ChatMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const supabase = useMemo(() => createClient(), []);
+
+  // Load parent + existing replies on mount (component is keyed by parentId,
+  // so a new parentId remounts and starts fresh with loading=true).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [{ data: parentRow }, { data: replyRows }] = await Promise.all([
+        supabase
+          .from("messages")
+          .select("id, body, created_at, user_id, parent_message_id")
+          .eq("id", parentId)
+          .maybeSingle(),
+        supabase
+          .from("messages")
+          .select("id, body, created_at, user_id, parent_message_id")
+          .eq("parent_message_id", parentId)
+          .is("deleted_at", null)
+          .order("created_at", { ascending: true }),
+      ]);
+      if (cancelled) return;
+      setParent((parentRow ?? null) as ChatMessage | null);
+      setReplies((replyRows ?? []) as ChatMessage[]);
+
+      // Fetch any unknown author profiles in this thread.
+      const allAuthors = new Set<string>();
+      if (parentRow) allAuthors.add(parentRow.user_id);
+      for (const r of replyRows ?? []) allAuthors.add(r.user_id);
+      const missing = Array.from(allAuthors).filter((id) => !profiles.has(id));
+      if (missing.length > 0) {
+        const { data: profs } = await supabase
+          .from("profiles")
+          .select("id, display_name, avatar_url")
+          .in("id", missing);
+        if (!cancelled && profs) {
+          setProfiles((prev) => {
+            const next = new Map(prev);
+            for (const p of profs) next.set(p.id, p as ChatProfile);
+            return next;
+          });
+        }
+      }
+      setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [parentId, supabase, profiles, setProfiles]);
+
+  // Realtime subscription scoped to this thread.
+  useEffect(() => {
+    let cancelled = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    (async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (cancelled) return;
+      if (session?.access_token) {
+        await supabase.realtime.setAuth(session.access_token);
+      }
+
+      channel = supabase
+        .channel(`thread:${parentId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "messages",
+            filter: `parent_message_id=eq.${parentId}`,
+          },
+          (payload) => {
+            const row = payload.new as ChatMessage;
+            setReplies((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
+          },
+        )
+        .subscribe();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (channel) supabase.removeChannel(channel);
+    };
+  }, [parentId, supabase]);
+
+  return (
+    <aside className="flex w-96 flex-col bg-white">
+      <header className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+        <h2 className="text-sm font-semibold text-gray-900">スレッド</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+          aria-label="閉じる"
+        >
+          ✕
+        </button>
+      </header>
+
+      <div className="flex-1 overflow-y-auto bg-gray-50 px-4 py-3">
+        {loading ? (
+          <div className="py-8 text-center text-sm text-gray-400">読み込み中...</div>
+        ) : !parent ? (
+          <div className="py-8 text-center text-sm text-gray-400">
+            親メッセージが見つかりません。
           </div>
         ) : (
-          <ul className="space-y-3">
-            {messages.map((m) => {
-              const profile = profiles.get(m.user_id);
-              const isMine = m.user_id === currentUserId;
-              return (
-                <li key={m.id} className="flex gap-3">
-                  <div className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
-                    {(profile?.display_name ?? "?").slice(0, 1).toUpperCase()}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-sm font-semibold text-gray-900">
-                        {profile?.display_name ?? "Unknown"}
-                        {isMine && <span className="ml-1 text-xs text-gray-400">(you)</span>}
-                      </span>
-                      <time className="text-xs text-gray-400" dateTime={m.created_at}>
-                        {new Date(m.created_at).toLocaleString("ja-JP", {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </time>
-                    </div>
-                    <p className="whitespace-pre-wrap break-words text-sm text-gray-800">
-                      {m.body}
-                    </p>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+          <>
+            <ThreadMessage
+              message={parent}
+              profile={profiles.get(parent.user_id) ?? null}
+              isMine={parent.user_id === currentUserId}
+              emphasize
+            />
+            {replies.length > 0 && (
+              <div className="my-3 flex items-center gap-2 text-xs text-gray-400">
+                <hr className="flex-1 border-gray-200" />
+                <span>{replies.length} 件の返信</span>
+                <hr className="flex-1 border-gray-200" />
+              </div>
+            )}
+            <ul className="space-y-3">
+              {replies.map((m) => (
+                <ThreadMessage
+                  key={m.id}
+                  message={m}
+                  profile={profiles.get(m.user_id) ?? null}
+                  isMine={m.user_id === currentUserId}
+                />
+              ))}
+            </ul>
+          </>
         )}
-        <div ref={listEndRef} />
       </div>
 
-      <form onSubmit={handleSubmit} className="border-t border-gray-200 bg-white px-4 py-3">
-        {error && (
-          <div className="mb-2 rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
-            {error}
-          </div>
-        )}
-        <div className="flex items-end gap-2">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                (e.currentTarget.form as HTMLFormElement | null)?.requestSubmit();
-              }
-            }}
-            rows={2}
-            maxLength={4000}
-            placeholder="メッセージを入力 (Enter で送信、Shift+Enter で改行)"
-            className="flex-1 resize-none rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
-          <button
-            type="submit"
-            disabled={sending || !draft.trim()}
-            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
-          >
-            送信
-          </button>
+      <Composer channelId={channelId} parentMessageId={parentId} placeholder="スレッドに返信" />
+    </aside>
+  );
+}
+
+function ThreadMessage({
+  message,
+  profile,
+  isMine,
+  emphasize = false,
+}: {
+  message: ChatMessage;
+  profile: ChatProfile | null;
+  isMine: boolean;
+  emphasize?: boolean;
+}) {
+  return (
+    <li
+      className={`flex gap-3 ${emphasize ? "rounded-md border border-blue-100 bg-blue-50 p-2" : ""}`}
+    >
+      <div className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
+        {(profile?.display_name ?? "?").slice(0, 1).toUpperCase()}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
+          <span className="text-xs font-semibold text-gray-900">
+            {profile?.display_name ?? "Unknown"}
+            {isMine && <span className="ml-1 text-xs text-gray-400">(you)</span>}
+          </span>
+          <time className="text-xs text-gray-400" dateTime={message.created_at}>
+            {new Date(message.created_at).toLocaleString("ja-JP", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </time>
         </div>
-      </form>
-    </>
+        <p className="whitespace-pre-wrap break-words text-sm text-gray-800">{message.body}</p>
+      </div>
+    </li>
   );
 }
