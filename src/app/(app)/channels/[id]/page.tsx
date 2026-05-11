@@ -1,6 +1,11 @@
 import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { MessageStream, type ChatMessage, type ChatProfile } from "./message-stream";
+import {
+  MessageStream,
+  type ChatMessage,
+  type ChatProfile,
+  type MentionableUser,
+} from "./message-stream";
 
 type Params = Promise<{ id: string }>;
 
@@ -98,6 +103,28 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
     initialProfiles = (profs ?? []) as ChatProfile[];
   }
 
+  // Channel members for the @-mention autocomplete picker.
+  let mentionableUsers: MentionableUser[] = [];
+  if (isMember) {
+    const { data: memberRows } = await supabase
+      .from("channel_members")
+      .select("profile:profiles!user_id(id, username, display_name)")
+      .eq("channel_id", id);
+    mentionableUsers = (memberRows ?? [])
+      .map((r) => {
+        const p = (
+          r as unknown as {
+            profile:
+              | { id: string; username: string | null; display_name: string }
+              | { id: string; username: string | null; display_name: string }[];
+          }
+        ).profile;
+        return Array.isArray(p) ? p[0] : p;
+      })
+      .filter((p): p is { id: string; username: string | null; display_name: string } => Boolean(p))
+      .sort((a, b) => a.display_name.localeCompare(b.display_name));
+  }
+
   return (
     <div className="flex h-screen flex-col">
       <header className="border-b border-gray-200 bg-white px-6 py-4">
@@ -114,6 +141,7 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
           initialMessages={initialMessages}
           initialProfiles={initialProfiles}
           initialReplyCounts={initialReplyCounts}
+          mentionableUsers={mentionableUsers}
           currentUserId={user.id}
         />
       ) : (
