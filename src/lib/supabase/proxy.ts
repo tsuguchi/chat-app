@@ -1,6 +1,13 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+// Paths that do not require authentication.
+const PUBLIC_PATHS = ["/login", "/auth"];
+
+function isPublicPath(pathname: string): boolean {
+  return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
+
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
@@ -23,9 +30,19 @@ export async function updateSession(request: NextRequest) {
     },
   );
 
-  // IMPORTANT: this refreshes the auth token on every request.
+  // IMPORTANT: refreshes the auth token on every request.
   // Do not put logic between createServerClient and getUser().
-  await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  // Redirect unauthenticated users to /login for protected paths.
+  if (!user && !isPublicPath(request.nextUrl.pathname)) {
+    const url = request.nextUrl.clone();
+    url.pathname = "/login";
+    url.search = "";
+    return NextResponse.redirect(url);
+  }
 
   return supabaseResponse;
 }
