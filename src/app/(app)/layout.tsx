@@ -50,7 +50,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           <ChannelSection title="パブリック" channels={publicChannels} />
           <ChannelSection title="プライベート" channels={privateChannels} />
 
-          <div className="mt-4 px-2">
+          <div className="mt-4 space-y-0.5 px-2">
+            <Link
+              href="/channels/browse"
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-gray-600 hover:bg-gray-100"
+            >
+              <span className="text-lg leading-none">🔍</span>
+              <span>チャンネルを探す</span>
+            </Link>
             <Link
               href="/channels/new"
               className="flex items-center gap-2 rounded-md px-2 py-1.5 text-gray-600 hover:bg-gray-100"
