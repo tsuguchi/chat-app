@@ -13,16 +13,16 @@ DM、チャンネル、スレッド、メンション、ファイル共有、グ
 
 ## 技術スタック
 
-| レイヤ | 技術 |
-|---|---|
+| レイヤ         | 技術                              |
+| -------------- | --------------------------------- |
 | フロントエンド | Next.js (App Router) + TypeScript |
-| UI | Tailwind CSS + shadcn/ui |
-| 認証 | Supabase Auth (Magic Link) |
-| データベース | Supabase PostgreSQL |
-| リアルタイム | Supabase Realtime |
-| ストレージ | Supabase Storage |
-| 通話 | LiveKit Cloud |
-| ホスティング | Vercel |
+| UI             | Tailwind CSS + shadcn/ui          |
+| 認証           | Supabase Auth (Magic Link)        |
+| データベース   | Supabase PostgreSQL               |
+| リアルタイム   | Supabase Realtime                 |
+| ストレージ     | Supabase Storage                  |
+| 通話           | LiveKit Cloud                     |
+| ホスティング   | Vercel                            |
 
 ## セットアップ
 
@@ -38,14 +38,14 @@ npm run dev
 
 ## 開発フェーズ
 
-| フェーズ | 内容 |
-|---|---|
-| Phase 1 | Supabaseセットアップ + 認証 + チャンネル + メッセージ送受信 |
-| Phase 2 | DM + スレッド + メンション + アプリ内通知 |
-| Phase 3 | リアクション + ファイル添付 |
-| Phase 4 | プレゼンス + 既読管理 + 権限管理 |
-| Phase 5 | キーワード通知 + おやすみモード |
-| Phase 6 | 音声・ビデオ通話 (LiveKit統合) |
+| フェーズ | 内容                                                        |
+| -------- | ----------------------------------------------------------- |
+| Phase 1  | Supabaseセットアップ + 認証 + チャンネル + メッセージ送受信 |
+| Phase 2  | DM + スレッド + メンション + アプリ内通知                   |
+| Phase 3  | リアクション + ファイル添付                                 |
+| Phase 4  | プレゼンス + 既読管理 + 権限管理                            |
+| Phase 5  | キーワード通知 + おやすみモード                             |
+| Phase 6  | 音声・ビデオ通話 (LiveKit統合)                              |
 
 ## ライセンス
 

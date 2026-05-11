@@ -1,9 +1,9 @@
 ---
 name: Feature request
 about: 機能追加・改善提案用テンプレート
-title: '[Feature] '
+title: "[Feature] "
 labels: enhancement
-assignees: ''
+assignees: ""
 ---
 
 ## 提案する機能
