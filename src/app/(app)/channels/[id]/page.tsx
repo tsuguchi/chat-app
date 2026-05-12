@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import {
   MessageStream,
@@ -14,6 +15,14 @@ import type { NotificationSetting } from "./actions";
 
 type Params = Promise<{ id: string }>;
 
+// Channel rendering used to be a chain of ~10 sequential awaits, which on a
+// cold Supabase round trip stacks up to several hundred ms of perceived
+// navigation latency. We now run queries in three phases:
+//   1. channel metadata + membership + caller profile (parallel)
+//   2. messages + mentionable members + DM peer label (parallel)
+//   3. reply counts + reactions + attachments + author profiles (parallel,
+//      depend on the message id slice from phase 2)
+// The "mark as read" write is moved to `after()` so it never blocks render.
 export default async function ChannelDetailPage({ params }: { params: Params }) {
   const { id } = await params;
 
@@ -25,49 +34,63 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
     redirect("/login");
   }
 
-  const { data: channel } = await supabase
-    .from("channels")
-    .select("id, type, name, description")
-    .eq("id", id)
-    .maybeSingle();
+  // Phase 1: channel + membership + caller profile in parallel.
+  const [channelRes, membershipRes, callerProfileRes] = await Promise.all([
+    supabase.from("channels").select("id, type, name, description").eq("id", id).maybeSingle(),
+    supabase
+      .from("channel_members")
+      .select("user_id, role, notification_setting")
+      .eq("channel_id", id)
+      .eq("user_id", user.id)
+      .maybeSingle(),
+    supabase.from("profiles").select("role").eq("id", user.id).maybeSingle(),
+  ]);
 
-  if (!channel) {
-    notFound();
-  }
+  const channel = channelRes.data;
+  if (!channel) notFound();
 
-  const { data: membership } = await supabase
-    .from("channel_members")
-    .select("user_id, role, notification_setting")
-    .eq("channel_id", id)
-    .eq("user_id", user.id)
-    .maybeSingle();
+  const membership = membershipRes.data;
   const isMember = membership !== null;
   const isChannelOwnerOrAdmin = membership?.role === "owner" || membership?.role === "admin";
   const notificationSetting =
     (membership?.notification_setting as NotificationSetting | undefined) ?? "all";
-
-  // Workspace admin (profiles.role) status is needed both for the private
-  // channel invite link and for showing the "delete others' messages"
-  // moderation control. Fetch once and reuse.
-  const { data: callerProfile } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .maybeSingle();
-  const isWorkspaceAdmin = callerProfile?.role === "admin";
-
+  const isWorkspaceAdmin = callerProfileRes.data?.role === "admin";
   const canInvite = channel.type === "private" && (isChannelOwnerOrAdmin || isWorkspaceAdmin);
+  const isDm = channel.type === "dm" || channel.type === "group_dm";
 
-  // For DMs, build the display label from the other participants.
+  // Phase 2: messages + DM peer label + mentionable users (parallel).
+  // - DM peer query is only needed for DM channels.
+  // - Mentionable users only matter for members of a non-DM channel.
+  const [messageRowsRes, dmPeersRes, mentionableRes] = await Promise.all([
+    supabase
+      .from("messages")
+      .select("id, body, created_at, user_id, parent_message_id, is_edited, edited_at, deleted_at")
+      .eq("channel_id", id)
+      .is("parent_message_id", null)
+      .order("created_at", { ascending: true })
+      .limit(200),
+    isDm
+      ? supabase
+          .from("channel_members")
+          .select("profile:profiles!user_id(display_name)")
+          .eq("channel_id", id)
+          .neq("user_id", user.id)
+      : Promise.resolve({ data: null as null }),
+    isMember
+      ? supabase
+          .from("channel_members")
+          .select("profile:profiles!user_id(id, username, display_name)")
+          .eq("channel_id", id)
+      : Promise.resolve({ data: null as null }),
+  ]);
+
+  const initialMessages = (messageRowsRes.data ?? []) as ChatMessage[];
+
+  // Build DM header label from the parallel result.
   let headerTitle: string;
   let headerSubtitle: string;
-  if (channel.type === "dm" || channel.type === "group_dm") {
-    const { data: otherMembers } = await supabase
-      .from("channel_members")
-      .select("profile:profiles!user_id(display_name)")
-      .eq("channel_id", id)
-      .neq("user_id", user.id);
-    const names = (otherMembers ?? [])
+  if (isDm) {
+    const names = (dmPeersRes.data ?? [])
       .map((r) => {
         const profile = (
           r as unknown as { profile: { display_name: string } | { display_name: string }[] }
@@ -84,119 +107,103 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
     headerSubtitle = channel.type === "private" ? "プライベート" : "パブリック";
   }
 
-  // Main channel view: top-level messages only. Soft-deleted rows are kept
-  // so the UI can render the "deleted" placeholder; replies live in thread
-  // panel.
-  const { data: messageRows } = await supabase
-    .from("messages")
-    .select("id, body, created_at, user_id, parent_message_id, is_edited, edited_at, deleted_at")
-    .eq("channel_id", id)
-    .is("parent_message_id", null)
-    .order("created_at", { ascending: true })
-    .limit(200);
+  const mentionableUsers: MentionableUser[] = ((mentionableRes.data ?? []) as unknown[])
+    .map((r) => {
+      const p = (
+        r as {
+          profile:
+            | { id: string; username: string | null; display_name: string }
+            | { id: string; username: string | null; display_name: string }[];
+        }
+      ).profile;
+      return Array.isArray(p) ? p[0] : p;
+    })
+    .filter((p): p is { id: string; username: string | null; display_name: string } => Boolean(p))
+    .sort((a, b) => a.display_name.localeCompare(b.display_name));
 
-  const initialMessages = (messageRows ?? []) as ChatMessage[];
-
-  // Mark the channel as read up through the latest visible top-level message.
-  // The sidebar's unread badge will clear on the next navigation since the
-  // layout always re-renders (cookie-bound server component).
+  // Defer the "mark as read" write until after the response is flushed —
+  // the user does not need to wait on this, and the sidebar's unread badge
+  // updates on the next navigation anyway.
   if (isMember && initialMessages.length > 0) {
     const latestId = initialMessages[initialMessages.length - 1].id;
-    await supabase
-      .from("channel_members")
-      .update({ last_read_message_id: latestId })
-      .eq("channel_id", id)
-      .eq("user_id", user.id);
+    after(async () => {
+      await supabase
+        .from("channel_members")
+        .update({ last_read_message_id: latestId })
+        .eq("channel_id", id)
+        .eq("user_id", user.id);
+    });
   }
 
-  // Compute reply counts for visible top-level messages.
+  // Phase 3: reply counts + reactions + attachments + author profiles
+  // (all depend on the message id slice and can run in parallel).
   const topIds = initialMessages.map((m) => m.id);
-  const initialReplyCounts: Record<string, number> = {};
-  if (topIds.length > 0) {
-    const { data: replyRows } = await supabase
-      .from("messages")
-      .select("parent_message_id")
-      .eq("channel_id", id)
-      .is("deleted_at", null)
-      .in("parent_message_id", topIds);
-    for (const r of replyRows ?? []) {
-      const pid = r.parent_message_id as string | null;
-      if (pid) initialReplyCounts[pid] = (initialReplyCounts[pid] ?? 0) + 1;
-    }
-  }
-
-  // Pre-fetch reactions for the initial top-level slice. RLS limits this
-  // to messages the user can see, which matches what we render.
-  let initialReactions: ReactionRow[] = [];
-  if (topIds.length > 0) {
-    const { data: rxRows } = await supabase
-      .from("message_reactions")
-      .select("message_id, user_id, emoji")
-      .in("message_id", topIds);
-    initialReactions = (rxRows ?? []) as ReactionRow[];
-  }
-
-  // Pre-fetch attachments for the initial top-level slice and mint signed
-  // URLs server-side so the client renders without an extra round trip.
-  let initialAttachments: ChatAttachment[] = [];
-  if (topIds.length > 0) {
-    const { data: attRows } = await supabase
-      .from("message_attachments")
-      .select("id, message_id, storage_path, file_name, mime_type, size_bytes")
-      .in("message_id", topIds);
-    const rows = attRows ?? [];
-    if (rows.length > 0) {
-      const paths = rows.map((a) => a.storage_path);
-      const { data: signed } = await supabase.storage
-        .from("attachments")
-        .createSignedUrls(paths, 3600);
-      const urlByPath = new Map<string, string>();
-      for (const s of signed ?? []) {
-        if (s.path && s.signedUrl) urlByPath.set(s.path, s.signedUrl);
-      }
-      initialAttachments = rows.map((a) => ({
-        id: a.id,
-        message_id: a.message_id,
-        storage_path: a.storage_path,
-        file_name: a.file_name,
-        mime_type: a.mime_type,
-        size_bytes: a.size_bytes,
-        signed_url: urlByPath.get(a.storage_path) ?? "",
-      }));
-    }
-  }
-
-  // Pre-fetch profiles for all authors in the initial message set.
   const authorIds = Array.from(new Set(initialMessages.map((m) => m.user_id)));
-  let initialProfiles: ChatProfile[] = [];
-  if (authorIds.length > 0) {
-    const { data: profs } = await supabase
-      .from("profiles")
-      .select("id, display_name, avatar_url")
-      .in("id", authorIds);
-    initialProfiles = (profs ?? []) as ChatProfile[];
+
+  const [replyRowsRes, rxRowsRes, attRowsRes, authorProfsRes] = await Promise.all([
+    topIds.length > 0
+      ? supabase
+          .from("messages")
+          .select("parent_message_id")
+          .eq("channel_id", id)
+          .is("deleted_at", null)
+          .in("parent_message_id", topIds)
+      : Promise.resolve({ data: null as null }),
+    topIds.length > 0
+      ? supabase
+          .from("message_reactions")
+          .select("message_id, user_id, emoji")
+          .in("message_id", topIds)
+      : Promise.resolve({ data: null as null }),
+    topIds.length > 0
+      ? supabase
+          .from("message_attachments")
+          .select("id, message_id, storage_path, file_name, mime_type, size_bytes")
+          .in("message_id", topIds)
+      : Promise.resolve({ data: null as null }),
+    authorIds.length > 0
+      ? supabase.from("profiles").select("id, display_name, avatar_url").in("id", authorIds)
+      : Promise.resolve({ data: null as null }),
+  ]);
+
+  const initialReplyCounts: Record<string, number> = {};
+  for (const r of (replyRowsRes.data ?? []) as { parent_message_id: string | null }[]) {
+    if (r.parent_message_id) {
+      initialReplyCounts[r.parent_message_id] =
+        (initialReplyCounts[r.parent_message_id] ?? 0) + 1;
+    }
   }
 
-  // Channel members for the @-mention autocomplete picker.
-  let mentionableUsers: MentionableUser[] = [];
-  if (isMember) {
-    const { data: memberRows } = await supabase
-      .from("channel_members")
-      .select("profile:profiles!user_id(id, username, display_name)")
-      .eq("channel_id", id);
-    mentionableUsers = (memberRows ?? [])
-      .map((r) => {
-        const p = (
-          r as unknown as {
-            profile:
-              | { id: string; username: string | null; display_name: string }
-              | { id: string; username: string | null; display_name: string }[];
-          }
-        ).profile;
-        return Array.isArray(p) ? p[0] : p;
-      })
-      .filter((p): p is { id: string; username: string | null; display_name: string } => Boolean(p))
-      .sort((a, b) => a.display_name.localeCompare(b.display_name));
+  const initialReactions: ReactionRow[] = (rxRowsRes.data ?? []) as ReactionRow[];
+  const initialProfiles: ChatProfile[] = (authorProfsRes.data ?? []) as ChatProfile[];
+
+  // Attachments need signed URLs minted server-side, so this branch still
+  // has one sequential storage call after the table read.
+  let initialAttachments: ChatAttachment[] = [];
+  const attRows = (attRowsRes.data ?? []) as {
+    id: string;
+    message_id: string;
+    storage_path: string;
+    file_name: string;
+    mime_type: string | null;
+    size_bytes: number;
+  }[];
+  if (attRows.length > 0) {
+    const paths = attRows.map((a) => a.storage_path);
+    const { data: signed } = await supabase.storage.from("attachments").createSignedUrls(paths, 3600);
+    const urlByPath = new Map<string, string>();
+    for (const s of signed ?? []) {
+      if (s.path && s.signedUrl) urlByPath.set(s.path, s.signedUrl);
+    }
+    initialAttachments = attRows.map((a) => ({
+      id: a.id,
+      message_id: a.message_id,
+      storage_path: a.storage_path,
+      file_name: a.file_name,
+      mime_type: a.mime_type,
+      size_bytes: a.size_bytes,
+      signed_url: urlByPath.get(a.storage_path) ?? "",
+    }));
   }
 
   return (
