@@ -76,6 +76,18 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
 
   const initialMessages = (messageRows ?? []) as ChatMessage[];
 
+  // Mark the channel as read up through the latest visible top-level message.
+  // The sidebar's unread badge will clear on the next navigation since the
+  // layout always re-renders (cookie-bound server component).
+  if (isMember && initialMessages.length > 0) {
+    const latestId = initialMessages[initialMessages.length - 1].id;
+    await supabase
+      .from("channel_members")
+      .update({ last_read_message_id: latestId })
+      .eq("channel_id", id)
+      .eq("user_id", user.id);
+  }
+
   // Compute reply counts for visible top-level messages.
   const topIds = initialMessages.map((m) => m.id);
   const initialReplyCounts: Record<string, number> = {};
