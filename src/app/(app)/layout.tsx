@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { signOut } from "./actions";
 import { PresenceProvider } from "./presence-provider";
+import { SidebarSearchInput } from "./search-input";
 
 type ChannelRow = { id: string; type: string; name: string | null; is_archived: boolean };
 type UnreadInfo = { unread: number; mentions: number };
@@ -111,10 +112,13 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <PresenceProvider userId={user.id}>
       <div className="flex min-h-screen bg-gray-50">
         <aside className="flex w-64 flex-col border-r border-gray-200 bg-white">
-          <div className="border-b border-gray-200 px-4 py-4">
-            <Link href="/" className="block text-lg font-semibold text-gray-900">
-              chat-app
-            </Link>
+          <div className="border-b border-gray-200">
+            <div className="px-4 py-4">
+              <Link href="/" className="block text-lg font-semibold text-gray-900">
+                chat-app
+              </Link>
+            </div>
+            <SidebarSearchInput />
           </div>
 
           <nav className="flex-1 overflow-y-auto px-2 py-4 text-sm">
