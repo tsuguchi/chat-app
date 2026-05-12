@@ -135,11 +135,13 @@ export function MessageStream({
   // the subscription down on every render.
   const supabase = useMemo(() => createClient(), []);
 
-  // Realtime subscription: route INSERTs to main list, reply counts, and/or
-  // the open thread panel based on parent_message_id.
+  // Realtime: one channel per table. Bundling multiple `postgres_changes`
+  // listeners on a single channel started dropping deliveries once we hit
+  // four — splitting them into separate channels keeps each subscription
+  // independent and reliable.
   useEffect(() => {
     let cancelled = false;
-    let channel: ReturnType<typeof supabase.channel> | null = null;
+    const channels: Array<ReturnType<typeof supabase.channel>> = [];
 
     (async () => {
       const {
@@ -150,8 +152,8 @@ export function MessageStream({
         await supabase.realtime.setAuth(session.access_token);
       }
 
-      channel = supabase
-        .channel(`messages:channel:${channelId}`)
+      const messagesChannel = supabase
+        .channel(`channel-${channelId}-messages`)
         .on(
           "postgres_changes",
           {
@@ -163,17 +165,14 @@ export function MessageStream({
           async (payload) => {
             const row = payload.new as ChatMessage;
             if (row.parent_message_id) {
-              // Reply: bump reply count.
               setReplyCounts((prev) => ({
                 ...prev,
                 [row.parent_message_id!]: (prev[row.parent_message_id!] ?? 0) + 1,
               }));
             } else {
-              // Top-level: append to main list (dedupe).
               setMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
             }
 
-            // Lazy-load author profile if unknown.
             if (!profilesRef.current.has(row.user_id)) {
               const { data: prof } = await supabase
                 .from("profiles")
@@ -186,6 +185,11 @@ export function MessageStream({
             }
           },
         )
+        .subscribe();
+      channels.push(messagesChannel);
+
+      const reactionsChannel = supabase
+        .channel(`channel-${channelId}-reactions`)
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "message_reactions" },
@@ -220,6 +224,11 @@ export function MessageStream({
             });
           },
         )
+        .subscribe();
+      channels.push(reactionsChannel);
+
+      const attachmentsChannel = supabase
+        .channel(`channel-${channelId}-attachments`)
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "message_attachments" },
@@ -249,11 +258,12 @@ export function MessageStream({
           },
         )
         .subscribe();
+      channels.push(attachmentsChannel);
     })();
 
     return () => {
       cancelled = true;
-      if (channel) supabase.removeChannel(channel);
+      for (const c of channels) supabase.removeChannel(c);
     };
   }, [channelId, supabase]);
 
