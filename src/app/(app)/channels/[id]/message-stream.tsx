@@ -185,11 +185,19 @@ export function MessageStream({
             }
           },
         )
-        .subscribe();
+        .subscribe((status, err) => {
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            console.warn("[realtime] messages channel:", status, err ?? "");
+          }
+        });
       channels.push(messagesChannel);
 
-      const reactionsChannel = supabase
-        .channel(`channel-${channelId}-reactions`)
+      // Bundle reactions + attachments into one channel; the messages channel
+      // stays separate so its channel_id=eq.<id> filter can be applied at the
+      // server. Empirically two channels behaves better than three at this
+      // client's volume.
+      const sideChannel = supabase
+        .channel(`channel-${channelId}-side`)
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "message_reactions" },
@@ -224,11 +232,6 @@ export function MessageStream({
             });
           },
         )
-        .subscribe();
-      channels.push(reactionsChannel);
-
-      const attachmentsChannel = supabase
-        .channel(`channel-${channelId}-attachments`)
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "message_attachments" },
@@ -257,8 +260,12 @@ export function MessageStream({
             });
           },
         )
-        .subscribe();
-      channels.push(attachmentsChannel);
+        .subscribe((status, err) => {
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            console.warn("[realtime] side channel:", status, err ?? "");
+          }
+        });
+      channels.push(sideChannel);
     })();
 
     return () => {
