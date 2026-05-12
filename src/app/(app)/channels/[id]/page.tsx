@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import {
@@ -34,11 +35,27 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
 
   const { data: membership } = await supabase
     .from("channel_members")
-    .select("user_id")
+    .select("user_id, role")
     .eq("channel_id", id)
     .eq("user_id", user.id)
     .maybeSingle();
   const isMember = membership !== null;
+  const isChannelOwnerOrAdmin = membership?.role === "owner" || membership?.role === "admin";
+
+  // Workspace admin (profiles.role) can also invite to any private channel.
+  let canInvite = false;
+  if (channel.type === "private") {
+    if (isChannelOwnerOrAdmin) {
+      canInvite = true;
+    } else {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .maybeSingle();
+      canInvite = prof?.role === "admin";
+    }
+  }
 
   // For DMs, build the display label from the other participants.
   let headerTitle: string;
@@ -184,9 +201,19 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
   return (
     <div className="flex h-screen flex-col">
       <header className="border-b border-gray-200 bg-white px-6 py-4">
-        <div className="flex items-baseline gap-3">
-          <h1 className="text-lg font-semibold text-gray-900">{headerTitle}</h1>
-          <span className="text-xs text-gray-500">{headerSubtitle}</span>
+        <div className="flex items-baseline justify-between gap-3">
+          <div className="flex items-baseline gap-3">
+            <h1 className="text-lg font-semibold text-gray-900">{headerTitle}</h1>
+            <span className="text-xs text-gray-500">{headerSubtitle}</span>
+          </div>
+          {canInvite && (
+            <Link
+              href={`/channels/${id}/invite`}
+              className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              + メンバーを招待
+            </Link>
+          )}
         </div>
         {channel.description && <p className="mt-1 text-sm text-gray-600">{channel.description}</p>}
       </header>
