@@ -10,7 +10,9 @@ import {
   type ReactionRow,
 } from "./message-stream";
 import { NotificationSelector } from "./notification-selector";
+import { CallControls } from "./call-controls";
 import type { NotificationSetting } from "./actions";
+import { getActiveCall } from "./call/actions";
 
 type Params = Promise<{ id: string }>;
 
@@ -57,6 +59,14 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
   const isWorkspaceAdmin = callerProfile?.role === "admin";
 
   const canInvite = channel.type === "private" && (isChannelOwnerOrAdmin || isWorkspaceAdmin);
+
+  // Surface an active call (if any) so the header can render either the
+  // "start" buttons or a "join" ribbon. The client component takes over
+  // from here via Realtime updates on the calls table.
+  const activeCall = isMember ? await getActiveCall(id) : null;
+  const initialActiveCall = activeCall
+    ? { id: activeCall.id, kind: activeCall.kind, started_by: activeCall.started_by }
+    : null;
 
   // For DMs, build the display label from the other participants.
   let headerTitle: string;
@@ -208,6 +218,7 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
             <span className="text-xs text-gray-500">{headerSubtitle}</span>
           </div>
           <div className="flex items-center gap-2">
+            {isMember && <CallControls channelId={id} initialActiveCall={initialActiveCall} />}
             {isMember && <NotificationSelector channelId={id} initial={notificationSetting} />}
             {canInvite && (
               <Link
