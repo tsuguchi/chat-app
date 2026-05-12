@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
@@ -257,5 +258,9 @@ export async function deleteChannel(channelId: string): Promise<ActionResult> {
     // No row matched the policy — caller wasn't allowed, or it's already gone.
     return { ok: false, error: "削除する権限がないか、すでに削除されています。" };
   }
+  // The sidebar's channel list lives in the (app) layout, which Next.js
+  // keeps in the router cache across soft navigations. Without this the
+  // deleted channel lingers in the sidebar until a hard reload.
+  revalidatePath("/", "layout");
   return { ok: true };
 }
