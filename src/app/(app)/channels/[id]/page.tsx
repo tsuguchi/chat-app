@@ -46,20 +46,17 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
   const notificationSetting =
     (membership?.notification_setting as NotificationSetting | undefined) ?? "all";
 
-  // Workspace admin (profiles.role) can also invite to any private channel.
-  let canInvite = false;
-  if (channel.type === "private") {
-    if (isChannelOwnerOrAdmin) {
-      canInvite = true;
-    } else {
-      const { data: prof } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .maybeSingle();
-      canInvite = prof?.role === "admin";
-    }
-  }
+  // Workspace admin (profiles.role) status is needed both for the private
+  // channel invite link and for showing the "delete others' messages"
+  // moderation control. Fetch once and reuse.
+  const { data: callerProfile } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .maybeSingle();
+  const isWorkspaceAdmin = callerProfile?.role === "admin";
+
+  const canInvite = channel.type === "private" && (isChannelOwnerOrAdmin || isWorkspaceAdmin);
 
   // For DMs, build the display label from the other participants.
   let headerTitle: string;
@@ -235,6 +232,7 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
           initialAttachments={initialAttachments}
           mentionableUsers={mentionableUsers}
           currentUserId={user.id}
+          isWorkspaceAdmin={isWorkspaceAdmin}
         />
       ) : (
         <div className="flex flex-1 items-center justify-center bg-gray-50 p-8 text-center text-sm text-gray-500">

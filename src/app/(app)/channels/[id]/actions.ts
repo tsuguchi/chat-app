@@ -204,11 +204,10 @@ export async function softDeleteMessage(messageId: string): Promise<ActionResult
   } = await supabase.auth.getUser();
   if (!user) return { ok: false, error: "ログインが切れています。" };
 
-  const { error } = await supabase
-    .from("messages")
-    .update({ deleted_at: new Date().toISOString() })
-    .eq("id", messageId)
-    .eq("user_id", user.id);
+  // RPC permits the author or a workspace admin. Going through it keeps
+  // admin moderation off the messages_update_author RLS, which we don't
+  // want to relax for body edits.
+  const { error } = await supabase.rpc("soft_delete_message", { _message_id: messageId });
   if (error) return { ok: false, error: error.message };
   return { ok: true };
 }

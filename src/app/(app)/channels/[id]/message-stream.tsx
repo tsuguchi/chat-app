@@ -56,6 +56,7 @@ type Props = {
   initialAttachments: ChatAttachment[];
   mentionableUsers: MentionableUser[];
   currentUserId: string;
+  isWorkspaceAdmin: boolean;
 };
 
 function buildAttachmentMap(rows: ChatAttachment[]): AttachmentsByMessage {
@@ -120,6 +121,7 @@ export function MessageStream({
   initialAttachments,
   mentionableUsers,
   currentUserId,
+  isWorkspaceAdmin,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [profiles, setProfiles] = useState<Map<string, ChatProfile>>(
@@ -341,6 +343,7 @@ export function MessageStream({
           reactions={reactions}
           attachments={attachments}
           currentUserId={currentUserId}
+          isWorkspaceAdmin={isWorkspaceAdmin}
           onOpenThread={openThread}
           onToggleReaction={toggleReaction}
         />
@@ -364,6 +367,7 @@ export function MessageStream({
           reactions={reactions}
           attachments={attachments}
           currentUserId={currentUserId}
+          isWorkspaceAdmin={isWorkspaceAdmin}
           onClose={closeThread}
           onToggleReaction={toggleReaction}
         />
@@ -379,6 +383,7 @@ function MessageList({
   reactions,
   attachments,
   currentUserId,
+  isWorkspaceAdmin,
   onOpenThread,
   onToggleReaction,
 }: {
@@ -388,6 +393,7 @@ function MessageList({
   reactions: ReactionsByMessage;
   attachments: AttachmentsByMessage;
   currentUserId: string;
+  isWorkspaceAdmin: boolean;
   onOpenThread: (parentId: string) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
 }) {
@@ -410,6 +416,7 @@ function MessageList({
               message={m}
               profile={profiles.get(m.user_id) ?? null}
               isMine={m.user_id === currentUserId}
+              isWorkspaceAdmin={isWorkspaceAdmin}
               replyCount={replyCounts[m.id] ?? 0}
               reactionSummary={summarizeReactions(reactions.get(m.id), currentUserId)}
               attachments={attachments.get(m.id) ?? []}
@@ -428,6 +435,7 @@ function MessageRow({
   message,
   profile,
   isMine,
+  isWorkspaceAdmin,
   replyCount,
   reactionSummary,
   attachments,
@@ -437,6 +445,7 @@ function MessageRow({
   message: ChatMessage;
   profile: ChatProfile | null;
   isMine: boolean;
+  isWorkspaceAdmin: boolean;
   replyCount: number;
   reactionSummary: ReactionSummary[];
   attachments: ChatAttachment[];
@@ -445,6 +454,8 @@ function MessageRow({
 }) {
   const [editing, setEditing] = useState(false);
   const isDeleted = !!message.deleted_at;
+  const canEdit = isMine;
+  const canDelete = isMine || isWorkspaceAdmin;
   return (
     <li className="group flex gap-3">
       <div className="relative flex-none">
@@ -507,27 +518,30 @@ function MessageRow({
                 返信 {replyCount} 件
               </button>
             )}
-            {isMine && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setEditing(true)}
-                  className="text-gray-500 opacity-0 hover:text-blue-600 group-hover:opacity-100"
-                >
-                  ✏️ 編集
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (confirm("このメッセージを削除しますか？")) {
-                      softDeleteMessage(message.id);
-                    }
-                  }}
-                  className="text-gray-500 opacity-0 hover:text-red-600 group-hover:opacity-100"
-                >
-                  🗑️ 削除
-                </button>
-              </>
+            {canEdit && (
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className="text-gray-500 opacity-0 hover:text-blue-600 group-hover:opacity-100"
+              >
+                ✏️ 編集
+              </button>
+            )}
+            {canDelete && (
+              <button
+                type="button"
+                onClick={() => {
+                  const prompt = isMine
+                    ? "このメッセージを削除しますか？"
+                    : "（管理者操作）このメッセージを削除しますか？";
+                  if (confirm(prompt)) {
+                    softDeleteMessage(message.id);
+                  }
+                }}
+                className="text-gray-500 opacity-0 hover:text-red-600 group-hover:opacity-100"
+              >
+                🗑️ 削除
+              </button>
             )}
           </div>
         )}
@@ -916,6 +930,7 @@ function ThreadPanel({
   reactions,
   attachments,
   currentUserId,
+  isWorkspaceAdmin,
   onClose,
   onToggleReaction,
 }: {
@@ -927,6 +942,7 @@ function ThreadPanel({
   reactions: ReactionsByMessage;
   attachments: AttachmentsByMessage;
   currentUserId: string;
+  isWorkspaceAdmin: boolean;
   onClose: () => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
 }) {
@@ -1071,6 +1087,7 @@ function ThreadPanel({
               message={parent}
               profile={profiles.get(parent.user_id) ?? null}
               isMine={parent.user_id === currentUserId}
+              isWorkspaceAdmin={isWorkspaceAdmin}
               reactionSummary={summarizeReactions(reactions.get(parent.id), currentUserId)}
               attachments={attachments.get(parent.id) ?? []}
               onToggleReaction={(emoji) => onToggleReaction(parent.id, emoji)}
@@ -1090,6 +1107,7 @@ function ThreadPanel({
                   message={m}
                   profile={profiles.get(m.user_id) ?? null}
                   isMine={m.user_id === currentUserId}
+                  isWorkspaceAdmin={isWorkspaceAdmin}
                   reactionSummary={summarizeReactions(reactions.get(m.id), currentUserId)}
                   attachments={attachments.get(m.id) ?? []}
                   onToggleReaction={(emoji) => onToggleReaction(m.id, emoji)}
@@ -1115,6 +1133,7 @@ function ThreadMessage({
   message,
   profile,
   isMine,
+  isWorkspaceAdmin,
   reactionSummary,
   attachments,
   onToggleReaction,
@@ -1123,6 +1142,7 @@ function ThreadMessage({
   message: ChatMessage;
   profile: ChatProfile | null;
   isMine: boolean;
+  isWorkspaceAdmin: boolean;
   reactionSummary: ReactionSummary[];
   attachments: ChatAttachment[];
   onToggleReaction: (emoji: string) => void;
@@ -1130,6 +1150,8 @@ function ThreadMessage({
 }) {
   const [editing, setEditing] = useState(false);
   const isDeleted = !!message.deleted_at;
+  const canEdit = isMine;
+  const canDelete = isMine || isWorkspaceAdmin;
   return (
     <li
       className={`group flex gap-3 ${emphasize ? "rounded-md border border-blue-100 bg-blue-50 p-2" : ""}`}
@@ -1176,26 +1198,33 @@ function ThreadMessage({
             />
           </>
         )}
-        {isMine && !isDeleted && !editing && (
+        {(canEdit || canDelete) && !isDeleted && !editing && (
           <div className="mt-1 flex items-center gap-3 text-xs">
-            <button
-              type="button"
-              onClick={() => setEditing(true)}
-              className="text-gray-500 opacity-0 hover:text-blue-600 group-hover:opacity-100"
-            >
-              ✏️ 編集
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (confirm("このメッセージを削除しますか？")) {
-                  softDeleteMessage(message.id);
-                }
-              }}
-              className="text-gray-500 opacity-0 hover:text-red-600 group-hover:opacity-100"
-            >
-              🗑️ 削除
-            </button>
+            {canEdit && (
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className="text-gray-500 opacity-0 hover:text-blue-600 group-hover:opacity-100"
+              >
+                ✏️ 編集
+              </button>
+            )}
+            {canDelete && (
+              <button
+                type="button"
+                onClick={() => {
+                  const prompt = isMine
+                    ? "このメッセージを削除しますか？"
+                    : "（管理者操作）このメッセージを削除しますか？";
+                  if (confirm(prompt)) {
+                    softDeleteMessage(message.id);
+                  }
+                }}
+                className="text-gray-500 opacity-0 hover:text-red-600 group-hover:opacity-100"
+              >
+                🗑️ 削除
+              </button>
+            )}
           </div>
         )}
       </div>
