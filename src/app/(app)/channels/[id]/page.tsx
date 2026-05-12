@@ -66,13 +66,14 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
     headerSubtitle = channel.type === "private" ? "プライベート" : "パブリック";
   }
 
-  // Main channel view: top-level messages only. Replies live in thread panel.
+  // Main channel view: top-level messages only. Soft-deleted rows are kept
+  // so the UI can render the "deleted" placeholder; replies live in thread
+  // panel.
   const { data: messageRows } = await supabase
     .from("messages")
-    .select("id, body, created_at, user_id, parent_message_id")
+    .select("id, body, created_at, user_id, parent_message_id, is_edited, edited_at, deleted_at")
     .eq("channel_id", id)
     .is("parent_message_id", null)
-    .is("deleted_at", null)
     .order("created_at", { ascending: true })
     .limit(200);
 

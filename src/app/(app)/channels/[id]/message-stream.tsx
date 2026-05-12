@@ -2,7 +2,14 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { addReaction, removeReaction, sendMessage } from "./actions";
+import {
+  addReaction,
+  editMessage,
+  removeReaction,
+  sendMessage,
+  softDeleteMessage,
+  type ActionResult,
+} from "./actions";
 import { MentionTextarea, type MentionableUser } from "./mention-textarea";
 
 export type ChatProfile = { id: string; display_name: string; avatar_url: string | null };
@@ -13,6 +20,9 @@ export type ChatMessage = {
   created_at: string;
   user_id: string;
   parent_message_id: string | null;
+  is_edited?: boolean | null;
+  edited_at?: string | null;
+  deleted_at?: string | null;
 };
 
 export type ReactionRow = { message_id: string; user_id: string; emoji: string };
@@ -183,6 +193,22 @@ export function MessageStream({
                 setProfiles((prev) => new Map(prev).set(prof.id, prof));
               }
             }
+          },
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "messages",
+            filter: `channel_id=eq.${channelId}`,
+          },
+          (payload) => {
+            const row = payload.new as ChatMessage;
+            // Only top-level messages live in `messages` state. Replies go via
+            // the thread panel's own subscription.
+            if (row.parent_message_id) return;
+            setMessages((prev) => prev.map((m) => (m.id === row.id ? { ...m, ...row } : m)));
           },
         )
         .subscribe((status, err) => {
@@ -416,6 +442,8 @@ function MessageRow({
   onReply: () => void;
   onToggleReaction: (emoji: string) => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const isDeleted = !!message.deleted_at;
   return (
     <li className="group flex gap-3">
       <div className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
@@ -433,30 +461,139 @@ function MessageRow({
               minute: "2-digit",
             })}
           </time>
+          {message.is_edited && !isDeleted && (
+            <span className="text-xs text-gray-400">(編集済み)</span>
+          )}
         </div>
-        {message.body && <MessageBody body={message.body} />}
-        <AttachmentList attachments={attachments} />
-        <ReactionBar summary={reactionSummary} onToggle={onToggleReaction} alwaysShowAdd={false} />
-        <div className="mt-1 flex items-center gap-3 text-xs">
-          <button
-            type="button"
-            onClick={onReply}
-            className="text-gray-500 opacity-0 hover:text-blue-600 group-hover:opacity-100"
-          >
-            💬 返信
-          </button>
-          {replyCount > 0 && (
+        {isDeleted ? (
+          <p className="text-sm italic text-gray-400">このメッセージは削除されました</p>
+        ) : editing ? (
+          <InlineEditor
+            initialBody={message.body}
+            onCancel={() => setEditing(false)}
+            onSaved={() => setEditing(false)}
+            onSubmit={(text) => editMessage(message.id, text)}
+          />
+        ) : (
+          <>
+            {message.body && <MessageBody body={message.body} />}
+            <AttachmentList attachments={attachments} />
+            <ReactionBar
+              summary={reactionSummary}
+              onToggle={onToggleReaction}
+              alwaysShowAdd={false}
+            />
+          </>
+        )}
+        {!isDeleted && !editing && (
+          <div className="mt-1 flex items-center gap-3 text-xs">
             <button
               type="button"
               onClick={onReply}
-              className="font-medium text-blue-600 hover:underline"
+              className="text-gray-500 opacity-0 hover:text-blue-600 group-hover:opacity-100"
             >
-              返信 {replyCount} 件
+              💬 返信
             </button>
-          )}
-        </div>
+            {replyCount > 0 && (
+              <button
+                type="button"
+                onClick={onReply}
+                className="font-medium text-blue-600 hover:underline"
+              >
+                返信 {replyCount} 件
+              </button>
+            )}
+            {isMine && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setEditing(true)}
+                  className="text-gray-500 opacity-0 hover:text-blue-600 group-hover:opacity-100"
+                >
+                  ✏️ 編集
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (confirm("このメッセージを削除しますか？")) {
+                      softDeleteMessage(message.id);
+                    }
+                  }}
+                  className="text-gray-500 opacity-0 hover:text-red-600 group-hover:opacity-100"
+                >
+                  🗑️ 削除
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </li>
+  );
+}
+
+function InlineEditor({
+  initialBody,
+  onCancel,
+  onSaved,
+  onSubmit,
+}: {
+  initialBody: string;
+  onCancel: () => void;
+  onSaved: () => void;
+  onSubmit: (text: string) => Promise<ActionResult>;
+}) {
+  const [draft, setDraft] = useState(initialBody);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    const result = await onSubmit(draft);
+    setSaving(false);
+    if (result.ok) {
+      onSaved();
+    } else {
+      setError(result.error);
+    }
+  }
+
+  return (
+    <div className="mt-1 space-y-2">
+      <textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        rows={2}
+        maxLength={4000}
+        className="block w-full resize-none rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        autoFocus
+      />
+      {error && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+          {error}
+        </div>
+      )}
+      <div className="flex gap-2 text-xs">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saving || !draft.trim()}
+          className="rounded-md bg-blue-600 px-3 py-1 font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+        >
+          {saving ? "保存中..." : "保存"}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          className="rounded-md border border-gray-300 bg-white px-3 py-1 font-medium text-gray-700 hover:bg-gray-50"
+        >
+          キャンセル
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -802,14 +939,17 @@ function ThreadPanel({
       const [{ data: parentRow }, { data: replyRows }] = await Promise.all([
         supabase
           .from("messages")
-          .select("id, body, created_at, user_id, parent_message_id")
+          .select(
+            "id, body, created_at, user_id, parent_message_id, is_edited, edited_at, deleted_at",
+          )
           .eq("id", parentId)
           .maybeSingle(),
         supabase
           .from("messages")
-          .select("id, body, created_at, user_id, parent_message_id")
+          .select(
+            "id, body, created_at, user_id, parent_message_id, is_edited, edited_at, deleted_at",
+          )
           .eq("parent_message_id", parentId)
-          .is("deleted_at", null)
           .order("created_at", { ascending: true }),
       ]);
       if (cancelled) return;
@@ -868,6 +1008,27 @@ function ThreadPanel({
           (payload) => {
             const row = payload.new as ChatMessage;
             setReplies((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
+          },
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "messages",
+            filter: `parent_message_id=eq.${parentId}`,
+          },
+          (payload) => {
+            const row = payload.new as ChatMessage;
+            setReplies((prev) => prev.map((m) => (m.id === row.id ? { ...m, ...row } : m)));
+          },
+        )
+        .on(
+          "postgres_changes",
+          { event: "UPDATE", schema: "public", table: "messages", filter: `id=eq.${parentId}` },
+          (payload) => {
+            const row = payload.new as ChatMessage;
+            setParent((prev) => (prev ? { ...prev, ...row } : prev));
           },
         )
         .subscribe();
@@ -963,6 +1124,8 @@ function ThreadMessage({
   onToggleReaction: (emoji: string) => void;
   emphasize?: boolean;
 }) {
+  const [editing, setEditing] = useState(false);
+  const isDeleted = !!message.deleted_at;
   return (
     <li
       className={`group flex gap-3 ${emphasize ? "rounded-md border border-blue-100 bg-blue-50 p-2" : ""}`}
@@ -982,10 +1145,52 @@ function ThreadMessage({
               minute: "2-digit",
             })}
           </time>
+          {message.is_edited && !isDeleted && (
+            <span className="text-xs text-gray-400">(編集済み)</span>
+          )}
         </div>
-        {message.body && <MessageBody body={message.body} />}
-        <AttachmentList attachments={attachments} />
-        <ReactionBar summary={reactionSummary} onToggle={onToggleReaction} alwaysShowAdd={false} />
+        {isDeleted ? (
+          <p className="text-sm italic text-gray-400">このメッセージは削除されました</p>
+        ) : editing ? (
+          <InlineEditor
+            initialBody={message.body}
+            onCancel={() => setEditing(false)}
+            onSaved={() => setEditing(false)}
+            onSubmit={(text) => editMessage(message.id, text)}
+          />
+        ) : (
+          <>
+            {message.body && <MessageBody body={message.body} />}
+            <AttachmentList attachments={attachments} />
+            <ReactionBar
+              summary={reactionSummary}
+              onToggle={onToggleReaction}
+              alwaysShowAdd={false}
+            />
+          </>
+        )}
+        {isMine && !isDeleted && !editing && (
+          <div className="mt-1 flex items-center gap-3 text-xs">
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="text-gray-500 opacity-0 hover:text-blue-600 group-hover:opacity-100"
+            >
+              ✏️ 編集
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (confirm("このメッセージを削除しますか？")) {
+                  softDeleteMessage(message.id);
+                }
+              }}
+              className="text-gray-500 opacity-0 hover:text-red-600 group-hover:opacity-100"
+            >
+              🗑️ 削除
+            </button>
+          </div>
+        )}
       </div>
     </li>
   );

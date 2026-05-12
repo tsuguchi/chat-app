@@ -176,3 +176,39 @@ export async function removeReaction(messageId: string, emoji: string): Promise<
   if (error) return { ok: false, error: error.message };
   return { ok: true };
 }
+
+export async function editMessage(messageId: string, newBody: string): Promise<ActionResult> {
+  const text = newBody.trim();
+  if (!text) return { ok: false, error: "本文を入力してください。" };
+  if (text.length > 4000) return { ok: false, error: "メッセージが長すぎます (4000文字まで)。" };
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "ログインが切れています。" };
+
+  const { error } = await supabase
+    .from("messages")
+    .update({ body: text, is_edited: true, edited_at: new Date().toISOString() })
+    .eq("id", messageId)
+    .eq("user_id", user.id);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+export async function softDeleteMessage(messageId: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "ログインが切れています。" };
+
+  const { error } = await supabase
+    .from("messages")
+    .update({ deleted_at: new Date().toISOString() })
+    .eq("id", messageId)
+    .eq("user_id", user.id);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
