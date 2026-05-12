@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { sendMessage } from "./actions";
+import { MentionTextarea, type MentionableUser } from "./mention-textarea";
 
 export type ChatProfile = { id: string; display_name: string; avatar_url: string | null };
 
@@ -14,11 +15,14 @@ export type ChatMessage = {
   parent_message_id: string | null;
 };
 
+export type { MentionableUser };
+
 type Props = {
   channelId: string;
   initialMessages: ChatMessage[];
   initialProfiles: ChatProfile[];
   initialReplyCounts: Record<string, number>;
+  mentionableUsers: MentionableUser[];
   currentUserId: string;
 };
 
@@ -27,6 +31,7 @@ export function MessageStream({
   initialMessages,
   initialProfiles,
   initialReplyCounts,
+  mentionableUsers,
   currentUserId,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
@@ -124,7 +129,8 @@ export function MessageStream({
         <Composer
           channelId={channelId}
           parentMessageId={null}
-          placeholder="メッセージを入力 (Enter で送信、Shift+Enter で改行)"
+          mentionableUsers={mentionableUsers}
+          placeholder="メッセージを入力 (@ でメンション、Enter で送信、Shift+Enter で改行)"
         />
       </div>
 
@@ -135,6 +141,7 @@ export function MessageStream({
           parentId={threadParentId}
           profiles={profiles}
           setProfiles={setProfiles}
+          mentionableUsers={mentionableUsers}
           currentUserId={currentUserId}
           onClose={closeThread}
         />
@@ -217,7 +224,7 @@ function MessageRow({
             })}
           </time>
         </div>
-        <p className="whitespace-pre-wrap break-words text-sm text-gray-800">{message.body}</p>
+        <MessageBody body={message.body} />
         <div className="mt-1 flex items-center gap-3 text-xs">
           <button
             type="button"
@@ -244,20 +251,22 @@ function MessageRow({
 function Composer({
   channelId,
   parentMessageId,
+  mentionableUsers,
   placeholder,
 }: {
   channelId: string;
   parentMessageId: string | null;
+  mentionableUsers: MentionableUser[];
   placeholder: string;
 }) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  const submit = useCallback(async () => {
     if (sending) return;
     const body = draft;
+    if (!body.trim()) return;
     setSending(true);
     setError(null);
     const result = await sendMessage(channelId, body, parentMessageId);
@@ -267,39 +276,71 @@ function Composer({
     } else {
       setError(result.error);
     }
-  }
+  }, [channelId, draft, parentMessageId, sending]);
 
   return (
-    <form onSubmit={handleSubmit} className="border-t border-gray-200 bg-white px-4 py-3">
+    <div className="border-t border-gray-200 bg-white px-4 py-3">
       {error && (
         <div className="mb-2 rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
           {error}
         </div>
       )}
       <div className="flex items-end gap-2">
-        <textarea
+        <MentionTextarea
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              (e.currentTarget.form as HTMLFormElement | null)?.requestSubmit();
-            }
-          }}
+          onChange={setDraft}
+          onSubmit={submit}
+          users={mentionableUsers}
+          placeholder={placeholder}
           rows={2}
           maxLength={4000}
-          placeholder={placeholder}
-          className="flex-1 resize-none rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          disabled={sending}
         />
         <button
-          type="submit"
+          type="button"
+          onClick={submit}
           disabled={sending || !draft.trim()}
           className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
         >
           送信
         </button>
       </div>
-    </form>
+    </div>
+  );
+}
+
+const MENTION_RE = /(?:^|\s)(@[A-Za-z0-9_]{1,32})\b/g;
+
+function MessageBody({ body }: { body: string }) {
+  const parts = useMemo(() => {
+    const out: Array<{ kind: "text" | "mention"; value: string }> = [];
+    let lastIndex = 0;
+    for (const m of body.matchAll(MENTION_RE)) {
+      const handle = m[1];
+      const idx = (m.index ?? 0) + m[0].indexOf(handle);
+      if (idx > lastIndex) out.push({ kind: "text", value: body.slice(lastIndex, idx) });
+      out.push({ kind: "mention", value: handle });
+      lastIndex = idx + handle.length;
+    }
+    if (lastIndex < body.length) out.push({ kind: "text", value: body.slice(lastIndex) });
+    return out;
+  }, [body]);
+
+  return (
+    <p className="whitespace-pre-wrap break-words text-sm text-gray-800">
+      {parts.map((p, i) =>
+        p.kind === "mention" ? (
+          <span
+            key={i}
+            className="rounded bg-blue-100 px-1 py-0.5 text-xs font-medium text-blue-800"
+          >
+            {p.value}
+          </span>
+        ) : (
+          <Fragment key={i}>{p.value}</Fragment>
+        ),
+      )}
+    </p>
   );
 }
 
@@ -308,6 +349,7 @@ function ThreadPanel({
   parentId,
   profiles,
   setProfiles,
+  mentionableUsers,
   currentUserId,
   onClose,
 }: {
@@ -315,6 +357,7 @@ function ThreadPanel({
   parentId: string;
   profiles: Map<string, ChatProfile>;
   setProfiles: React.Dispatch<React.SetStateAction<Map<string, ChatProfile>>>;
+  mentionableUsers: MentionableUser[];
   currentUserId: string;
   onClose: () => void;
 }) {
@@ -458,7 +501,12 @@ function ThreadPanel({
         )}
       </div>
 
-      <Composer channelId={channelId} parentMessageId={parentId} placeholder="スレッドに返信" />
+      <Composer
+        channelId={channelId}
+        parentMessageId={parentId}
+        mentionableUsers={mentionableUsers}
+        placeholder="スレッドに返信 (@ でメンション)"
+      />
     </aside>
   );
 }
@@ -494,7 +542,7 @@ function ThreadMessage({
             })}
           </time>
         </div>
-        <p className="whitespace-pre-wrap break-words text-sm text-gray-800">{message.body}</p>
+        <MessageBody body={message.body} />
       </div>
     </li>
   );
