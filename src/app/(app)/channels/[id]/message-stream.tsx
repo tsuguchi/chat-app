@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { sendMessage } from "./actions";
+import { addReaction, removeReaction, sendMessage } from "./actions";
 import { MentionTextarea, type MentionableUser } from "./mention-textarea";
 
 export type ChatProfile = { id: string; display_name: string; avatar_url: string | null };
@@ -15,22 +15,57 @@ export type ChatMessage = {
   parent_message_id: string | null;
 };
 
+export type ReactionRow = { message_id: string; user_id: string; emoji: string };
+type ReactionSummary = { emoji: string; count: number; hasMine: boolean };
+type ReactionsByMessage = Map<string, ReactionRow[]>;
+
 export type { MentionableUser };
+
+const COMMON_EMOJIS = ["👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉", "🚀", "👀", "✅", "❌"];
 
 type Props = {
   channelId: string;
   initialMessages: ChatMessage[];
   initialProfiles: ChatProfile[];
   initialReplyCounts: Record<string, number>;
+  initialReactions: ReactionRow[];
   mentionableUsers: MentionableUser[];
   currentUserId: string;
 };
+
+function buildReactionMap(rows: ReactionRow[]): ReactionsByMessage {
+  const map: ReactionsByMessage = new Map();
+  for (const r of rows) {
+    const list = map.get(r.message_id) ?? [];
+    list.push(r);
+    map.set(r.message_id, list);
+  }
+  return map;
+}
+
+function summarizeReactions(
+  rows: ReactionRow[] | undefined,
+  currentUserId: string,
+): ReactionSummary[] {
+  if (!rows || rows.length === 0) return [];
+  const byEmoji = new Map<string, { count: number; hasMine: boolean }>();
+  for (const r of rows) {
+    const cur = byEmoji.get(r.emoji) ?? { count: 0, hasMine: false };
+    cur.count += 1;
+    if (r.user_id === currentUserId) cur.hasMine = true;
+    byEmoji.set(r.emoji, cur);
+  }
+  return Array.from(byEmoji, ([emoji, info]) => ({ emoji, ...info })).sort(
+    (a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji),
+  );
+}
 
 export function MessageStream({
   channelId,
   initialMessages,
   initialProfiles,
   initialReplyCounts,
+  initialReactions,
   mentionableUsers,
   currentUserId,
 }: Props) {
@@ -44,6 +79,10 @@ export function MessageStream({
   }, [profiles]);
 
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>(initialReplyCounts);
+
+  const [reactions, setReactions] = useState<ReactionsByMessage>(() =>
+    buildReactionMap(initialReactions),
+  );
 
   const [threadParentId, setThreadParentId] = useState<string | null>(null);
 
@@ -102,6 +141,40 @@ export function MessageStream({
             }
           },
         )
+        .on(
+          "postgres_changes",
+          { event: "INSERT", schema: "public", table: "message_reactions" },
+          (payload) => {
+            const row = payload.new as ReactionRow;
+            setReactions((prev) => {
+              const list = prev.get(row.message_id);
+              if (list && list.some((r) => r.user_id === row.user_id && r.emoji === row.emoji)) {
+                return prev;
+              }
+              const next = new Map(prev);
+              next.set(row.message_id, [...(list ?? []), row]);
+              return next;
+            });
+          },
+        )
+        .on(
+          "postgres_changes",
+          { event: "DELETE", schema: "public", table: "message_reactions" },
+          (payload) => {
+            const old = payload.old as ReactionRow;
+            setReactions((prev) => {
+              const list = prev.get(old.message_id);
+              if (!list) return prev;
+              const next = list.filter(
+                (r) => !(r.user_id === old.user_id && r.emoji === old.emoji),
+              );
+              const map = new Map(prev);
+              if (next.length === 0) map.delete(old.message_id);
+              else map.set(old.message_id, next);
+              return map;
+            });
+          },
+        )
         .subscribe();
     })();
 
@@ -114,6 +187,31 @@ export function MessageStream({
   const openThread = useCallback((parentId: string) => setThreadParentId(parentId), []);
   const closeThread = useCallback(() => setThreadParentId(null), []);
 
+  const toggleReaction = useCallback(
+    async (messageId: string, emoji: string) => {
+      // Optimistic update: realtime will eventually echo, but we should not
+      // wait a round trip to repaint the pill.
+      let hasMineNow = false;
+      setReactions((prev) => {
+        const list = prev.get(messageId) ?? [];
+        hasMineNow = list.some((r) => r.user_id === currentUserId && r.emoji === emoji);
+        const next = hasMineNow
+          ? list.filter((r) => !(r.user_id === currentUserId && r.emoji === emoji))
+          : [...list, { message_id: messageId, user_id: currentUserId, emoji }];
+        const map = new Map(prev);
+        if (next.length === 0) map.delete(messageId);
+        else map.set(messageId, next);
+        return map;
+      });
+      if (hasMineNow) {
+        await removeReaction(messageId, emoji);
+      } else {
+        await addReaction(messageId, emoji);
+      }
+    },
+    [currentUserId],
+  );
+
   return (
     <div className="flex flex-1 overflow-hidden">
       <div
@@ -123,8 +221,10 @@ export function MessageStream({
           messages={messages}
           profiles={profiles}
           replyCounts={replyCounts}
+          reactions={reactions}
           currentUserId={currentUserId}
           onOpenThread={openThread}
+          onToggleReaction={toggleReaction}
         />
         <Composer
           channelId={channelId}
@@ -142,8 +242,10 @@ export function MessageStream({
           profiles={profiles}
           setProfiles={setProfiles}
           mentionableUsers={mentionableUsers}
+          reactions={reactions}
           currentUserId={currentUserId}
           onClose={closeThread}
+          onToggleReaction={toggleReaction}
         />
       )}
     </div>
@@ -154,14 +256,18 @@ function MessageList({
   messages,
   profiles,
   replyCounts,
+  reactions,
   currentUserId,
   onOpenThread,
+  onToggleReaction,
 }: {
   messages: ChatMessage[];
   profiles: Map<string, ChatProfile>;
   replyCounts: Record<string, number>;
+  reactions: ReactionsByMessage;
   currentUserId: string;
   onOpenThread: (parentId: string) => void;
+  onToggleReaction: (messageId: string, emoji: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -183,7 +289,9 @@ function MessageList({
               profile={profiles.get(m.user_id) ?? null}
               isMine={m.user_id === currentUserId}
               replyCount={replyCounts[m.id] ?? 0}
+              reactionSummary={summarizeReactions(reactions.get(m.id), currentUserId)}
               onReply={() => onOpenThread(m.id)}
+              onToggleReaction={(emoji) => onToggleReaction(m.id, emoji)}
             />
           ))}
         </ul>
@@ -198,13 +306,17 @@ function MessageRow({
   profile,
   isMine,
   replyCount,
+  reactionSummary,
   onReply,
+  onToggleReaction,
 }: {
   message: ChatMessage;
   profile: ChatProfile | null;
   isMine: boolean;
   replyCount: number;
+  reactionSummary: ReactionSummary[];
   onReply: () => void;
+  onToggleReaction: (emoji: string) => void;
 }) {
   return (
     <li className="group flex gap-3">
@@ -225,6 +337,7 @@ function MessageRow({
           </time>
         </div>
         <MessageBody body={message.body} />
+        <ReactionBar summary={reactionSummary} onToggle={onToggleReaction} alwaysShowAdd={false} />
         <div className="mt-1 flex items-center gap-3 text-xs">
           <button
             type="button"
@@ -245,6 +358,70 @@ function MessageRow({
         </div>
       </div>
     </li>
+  );
+}
+
+function ReactionBar({
+  summary,
+  onToggle,
+  alwaysShowAdd,
+}: {
+  summary: ReactionSummary[];
+  onToggle: (emoji: string) => void;
+  alwaysShowAdd: boolean;
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const hasAny = summary.length > 0;
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {summary.map((r) => (
+        <button
+          key={r.emoji}
+          type="button"
+          onClick={() => onToggle(r.emoji)}
+          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs ${
+            r.hasMine
+              ? "border-blue-300 bg-blue-50 text-blue-900"
+              : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+          }`}
+        >
+          <span>{r.emoji}</span>
+          <span className="font-medium">{r.count}</span>
+        </button>
+      ))}
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setPickerOpen((v) => !v)}
+          className={`rounded-full border border-gray-200 bg-white px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-50 ${
+            alwaysShowAdd || hasAny ? "" : "opacity-0 group-hover:opacity-100"
+          }`}
+          aria-label="リアクションを追加"
+        >
+          😊+
+        </button>
+        {pickerOpen && (
+          <div
+            className="absolute bottom-full left-0 z-10 mb-1 flex gap-1 rounded-md border border-gray-200 bg-white p-2 shadow-lg"
+            onMouseLeave={() => setPickerOpen(false)}
+          >
+            {COMMON_EMOJIS.map((e) => (
+              <button
+                key={e}
+                type="button"
+                onClick={() => {
+                  onToggle(e);
+                  setPickerOpen(false);
+                }}
+                className="rounded p-1 text-lg hover:bg-gray-100"
+              >
+                {e}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -350,16 +527,20 @@ function ThreadPanel({
   profiles,
   setProfiles,
   mentionableUsers,
+  reactions,
   currentUserId,
   onClose,
+  onToggleReaction,
 }: {
   channelId: string;
   parentId: string;
   profiles: Map<string, ChatProfile>;
   setProfiles: React.Dispatch<React.SetStateAction<Map<string, ChatProfile>>>;
   mentionableUsers: MentionableUser[];
+  reactions: ReactionsByMessage;
   currentUserId: string;
   onClose: () => void;
+  onToggleReaction: (messageId: string, emoji: string) => void;
 }) {
   const [parent, setParent] = useState<ChatMessage | null>(null);
   const [replies, setReplies] = useState<ChatMessage[]>([]);
@@ -478,6 +659,8 @@ function ThreadPanel({
               message={parent}
               profile={profiles.get(parent.user_id) ?? null}
               isMine={parent.user_id === currentUserId}
+              reactionSummary={summarizeReactions(reactions.get(parent.id), currentUserId)}
+              onToggleReaction={(emoji) => onToggleReaction(parent.id, emoji)}
               emphasize
             />
             {replies.length > 0 && (
@@ -494,6 +677,8 @@ function ThreadPanel({
                   message={m}
                   profile={profiles.get(m.user_id) ?? null}
                   isMine={m.user_id === currentUserId}
+                  reactionSummary={summarizeReactions(reactions.get(m.id), currentUserId)}
+                  onToggleReaction={(emoji) => onToggleReaction(m.id, emoji)}
                 />
               ))}
             </ul>
@@ -515,16 +700,20 @@ function ThreadMessage({
   message,
   profile,
   isMine,
+  reactionSummary,
+  onToggleReaction,
   emphasize = false,
 }: {
   message: ChatMessage;
   profile: ChatProfile | null;
   isMine: boolean;
+  reactionSummary: ReactionSummary[];
+  onToggleReaction: (emoji: string) => void;
   emphasize?: boolean;
 }) {
   return (
     <li
-      className={`flex gap-3 ${emphasize ? "rounded-md border border-blue-100 bg-blue-50 p-2" : ""}`}
+      className={`group flex gap-3 ${emphasize ? "rounded-md border border-blue-100 bg-blue-50 p-2" : ""}`}
     >
       <div className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
         {(profile?.display_name ?? "?").slice(0, 1).toUpperCase()}
@@ -543,6 +732,7 @@ function ThreadMessage({
           </time>
         </div>
         <MessageBody body={message.body} />
+        <ReactionBar summary={reactionSummary} onToggle={onToggleReaction} alwaysShowAdd={false} />
       </div>
     </li>
   );

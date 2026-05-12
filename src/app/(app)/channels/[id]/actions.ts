@@ -2,7 +2,8 @@
 
 import { createClient } from "@/lib/supabase/server";
 
-export type SendMessageResult = { ok: true } | { ok: false; error: string };
+export type ActionResult = { ok: true } | { ok: false; error: string };
+export type SendMessageResult = ActionResult;
 
 type ParsedMention = { kind: "user"; username: string } | { kind: "channel" } | { kind: "here" };
 
@@ -113,5 +114,42 @@ export async function sendMessage(
     }
   }
 
+  return { ok: true };
+}
+
+export async function addReaction(messageId: string, emoji: string): Promise<ActionResult> {
+  if (!emoji) return { ok: false, error: "絵文字を指定してください。" };
+  if (emoji.length > 64) return { ok: false, error: "絵文字が長すぎます。" };
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "ログインが切れています。" };
+
+  const { error } = await supabase.from("message_reactions").insert({
+    message_id: messageId,
+    user_id: user.id,
+    emoji,
+  });
+  // 23505 = unique_violation: already reacted with this emoji. Idempotent success.
+  if (error && error.code !== "23505") return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+export async function removeReaction(messageId: string, emoji: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "ログインが切れています。" };
+
+  const { error } = await supabase
+    .from("message_reactions")
+    .delete()
+    .eq("message_id", messageId)
+    .eq("user_id", user.id)
+    .eq("emoji", emoji);
+  if (error) return { ok: false, error: error.message };
   return { ok: true };
 }

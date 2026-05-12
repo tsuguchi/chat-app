@@ -5,6 +5,7 @@ import {
   type ChatMessage,
   type ChatProfile,
   type MentionableUser,
+  type ReactionRow,
 } from "./message-stream";
 
 type Params = Promise<{ id: string }>;
@@ -104,6 +105,17 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
     }
   }
 
+  // Pre-fetch reactions for the initial top-level slice. RLS limits this
+  // to messages the user can see, which matches what we render.
+  let initialReactions: ReactionRow[] = [];
+  if (topIds.length > 0) {
+    const { data: rxRows } = await supabase
+      .from("message_reactions")
+      .select("message_id, user_id, emoji")
+      .in("message_id", topIds);
+    initialReactions = (rxRows ?? []) as ReactionRow[];
+  }
+
   // Pre-fetch profiles for all authors in the initial message set.
   const authorIds = Array.from(new Set(initialMessages.map((m) => m.user_id)));
   let initialProfiles: ChatProfile[] = [];
@@ -153,6 +165,7 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
           initialMessages={initialMessages}
           initialProfiles={initialProfiles}
           initialReplyCounts={initialReplyCounts}
+          initialReactions={initialReactions}
           mentionableUsers={mentionableUsers}
           currentUserId={user.id}
         />
