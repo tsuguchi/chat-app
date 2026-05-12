@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import {
   MessageStream,
+  type ChatAttachment,
   type ChatMessage,
   type ChatProfile,
   type MentionableUser,
@@ -116,6 +117,36 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
     initialReactions = (rxRows ?? []) as ReactionRow[];
   }
 
+  // Pre-fetch attachments for the initial top-level slice and mint signed
+  // URLs server-side so the client renders without an extra round trip.
+  let initialAttachments: ChatAttachment[] = [];
+  if (topIds.length > 0) {
+    const { data: attRows } = await supabase
+      .from("message_attachments")
+      .select("id, message_id, storage_path, file_name, mime_type, size_bytes")
+      .in("message_id", topIds);
+    const rows = attRows ?? [];
+    if (rows.length > 0) {
+      const paths = rows.map((a) => a.storage_path);
+      const { data: signed } = await supabase.storage
+        .from("attachments")
+        .createSignedUrls(paths, 3600);
+      const urlByPath = new Map<string, string>();
+      for (const s of signed ?? []) {
+        if (s.path && s.signedUrl) urlByPath.set(s.path, s.signedUrl);
+      }
+      initialAttachments = rows.map((a) => ({
+        id: a.id,
+        message_id: a.message_id,
+        storage_path: a.storage_path,
+        file_name: a.file_name,
+        mime_type: a.mime_type,
+        size_bytes: a.size_bytes,
+        signed_url: urlByPath.get(a.storage_path) ?? "",
+      }));
+    }
+  }
+
   // Pre-fetch profiles for all authors in the initial message set.
   const authorIds = Array.from(new Set(initialMessages.map((m) => m.user_id)));
   let initialProfiles: ChatProfile[] = [];
@@ -166,6 +197,7 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
           initialProfiles={initialProfiles}
           initialReplyCounts={initialReplyCounts}
           initialReactions={initialReactions}
+          initialAttachments={initialAttachments}
           mentionableUsers={mentionableUsers}
           currentUserId={user.id}
         />
