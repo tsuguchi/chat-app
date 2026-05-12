@@ -236,3 +236,26 @@ export async function updateNotificationSetting(
   if (error) return { ok: false, error: error.message };
   return { ok: true };
 }
+
+export async function deleteChannel(channelId: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "ログインが切れています。" };
+
+  // Authorization is enforced by the channels_delete_owner_or_admin RLS:
+  // creator / channel owner / workspace admin only, and DMs are excluded.
+  // The DELETE cascades through messages → reactions / mentions / attachments
+  // and through channel_members, so a single statement wipes the room.
+  const { error, count } = await supabase
+    .from("channels")
+    .delete({ count: "exact" })
+    .eq("id", channelId);
+  if (error) return { ok: false, error: error.message };
+  if (count === 0) {
+    // No row matched the policy — caller wasn't allowed, or it's already gone.
+    return { ok: false, error: "削除する権限がないか、すでに削除されています。" };
+  }
+  return { ok: true };
+}

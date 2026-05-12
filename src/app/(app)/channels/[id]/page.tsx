@@ -11,6 +11,7 @@ import {
   type ReactionRow,
 } from "./message-stream";
 import { NotificationSelector } from "./notification-selector";
+import { DeleteChannelButton } from "./delete-channel-button";
 import type { NotificationSetting } from "./actions";
 
 type Params = Promise<{ id: string }>;
@@ -57,6 +58,13 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
   const isWorkspaceAdmin = callerProfileRes.data?.role === "admin";
   const canInvite = channel.type === "private" && (isChannelOwnerOrAdmin || isWorkspaceAdmin);
   const isDm = channel.type === "dm" || channel.type === "group_dm";
+
+  // Channel deletion is allowed for the channel owner or a workspace admin,
+  // and only for public/private channels. DM channels are not deletable
+  // through the UI (out of scope for this feature).
+  const isOwner = membership?.role === "owner";
+  const canDelete =
+    (channel.type === "public" || channel.type === "private") && (isOwner || isWorkspaceAdmin);
 
   // Phase 2: messages + DM peer label + mentionable users (parallel).
   // - DM peer query is only needed for DM channels.
@@ -223,6 +231,9 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
               >
                 + メンバーを招待
               </Link>
+            )}
+            {canDelete && (
+              <DeleteChannelButton channelId={id} channelLabel={channel.name ?? ""} />
             )}
           </div>
         </div>
