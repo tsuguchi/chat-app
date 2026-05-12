@@ -1,0 +1,75 @@
+erDiagram
+    auth_users ||--|| profiles : "extends"
+    profiles ||--o{ channels : "creates"
+    profiles ||--o{ channel_members : "joins"
+    channels ||--o{ channel_members : "has members"
+    channels ||--o{ messages : "contains"
+    profiles ||--o{ messages : "posts"
+    messages ||--o{ messages : "thread reply"
+    messages ||--o{ message_reactions : "receives"
+    profiles ||--o{ message_reactions : "reacts"
+    messages ||--o{ message_mentions : "has"
+    profiles ||--o{ message_mentions : "mentioned"
+    messages ||--o{ message_attachments : "has"
+
+    auth_users {
+        uuid id PK
+        text email
+    }
+    profiles {
+        uuid id PK
+        text username
+        text display_name
+        text avatar_url
+        text status_text
+        text role
+        timestamptz created_at
+    }
+    channels {
+        uuid id PK
+        text type
+        text name
+        text description
+        uuid created_by FK
+        boolean is_archived
+        timestamptz created_at
+    }
+    channel_members {
+        uuid channel_id PK
+        uuid user_id PK
+        text role
+        timestamptz joined_at
+        uuid last_read_message_id
+        text notification_setting
+    }
+    messages {
+        uuid id PK
+        uuid channel_id FK
+        uuid user_id FK
+        uuid parent_message_id FK
+        text body
+        boolean is_edited
+        timestamptz edited_at
+        timestamptz deleted_at
+        timestamptz created_at
+    }
+    message_reactions {
+        uuid message_id PK
+        uuid user_id PK
+        text emoji PK
+        timestamptz created_at
+    }
+    message_mentions {
+        uuid message_id PK
+        uuid mentioned_user_id PK
+        text mention_type PK
+    }
+    message_attachments {
+        uuid id PK
+        uuid message_id FK
+        text storage_path
+        text file_name
+        text mime_type
+        bigint size_bytes
+        timestamptz created_at
+    }

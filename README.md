@@ -78,83 +78,10 @@ PostgreSQL の pg_trgm GIN インデックスでサーバー側検索。本文�
 
 ## データモデル (ER 図)
 
-```mermaid
-erDiagram
-    auth_users ||--|| profiles : "extends"
-    profiles ||--o{ channels : "creates"
-    profiles ||--o{ channel_members : "joins"
-    channels ||--o{ channel_members : "has members"
-    channels ||--o{ messages : "contains"
-    profiles ||--o{ messages : "posts"
-    messages ||--o{ messages : "thread reply"
-    messages ||--o{ message_reactions : "receives"
-    profiles ||--o{ message_reactions : "reacts"
-    messages ||--o{ message_mentions : "has"
-    profiles ||--o{ message_mentions : "mentioned"
-    messages ||--o{ message_attachments : "has"
+![ER 図](./docs/screenshots/er-diagram.png)
 
-    auth_users {
-        uuid id PK
-        text email
-    }
-    profiles {
-        uuid id PK_FK
-        text username UK
-        text display_name
-        text avatar_url
-        text status_text
-        text role "admin | member"
-        timestamptz created_at
-    }
-    channels {
-        uuid id PK
-        text type "public | private | dm | group_dm"
-        text name "null when dm/group_dm"
-        text description
-        uuid created_by FK
-        boolean is_archived
-        timestamptz created_at
-    }
-    channel_members {
-        uuid channel_id PK_FK
-        uuid user_id PK_FK
-        text role "owner | admin | member"
-        timestamptz joined_at
-        uuid last_read_message_id
-        text notification_setting "all | mentions | none"
-    }
-    messages {
-        uuid id PK
-        uuid channel_id FK
-        uuid user_id FK
-        uuid parent_message_id FK "self-ref for threads"
-        text body
-        boolean is_edited
-        timestamptz edited_at
-        timestamptz deleted_at "soft delete"
-        timestamptz created_at
-    }
-    message_reactions {
-        uuid message_id PK_FK
-        uuid user_id PK_FK
-        text emoji PK
-        timestamptz created_at
-    }
-    message_mentions {
-        uuid message_id PK_FK
-        uuid mentioned_user_id PK_FK
-        text mention_type PK "user | channel | here"
-    }
-    message_attachments {
-        uuid id PK
-        uuid message_id FK
-        text storage_path
-        text file_name
-        text mime_type
-        bigint size_bytes
-        timestamptz created_at
-    }
-```
+> 図のソース: [docs/er-diagram.mmd](./docs/er-diagram.mmd)（Mermaid `erDiagram`）。
+> 再生成は `curl -X POST https://mermaid.ink/img/... > docs/screenshots/er-diagram.png` で実行できます。
 
 設計のポイント:
 
