@@ -2,6 +2,7 @@
 
 import { useMemo, useState, useTransition } from "react";
 import { findOrCreateDirectMessage } from "./actions";
+import { OnlineDot } from "../../presence-provider";
 
 export type PickableUser = {
   id: string;
@@ -76,8 +77,11 @@ export function UserPicker({ users }: { users: PickableUser[] }) {
                       onChange={() => toggle(u.id)}
                       className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                     />
-                    <div className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
-                      {u.display_name.slice(0, 1).toUpperCase()}
+                    <div className="relative flex-none">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
+                        {u.display_name.slice(0, 1).toUpperCase()}
+                      </div>
+                      <OnlineDot userId={u.id} className="absolute bottom-0 right-0" />
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium text-gray-900">{u.display_name}</p>
