@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { signOut } from "./actions";
+import { PresenceProvider } from "./presence-provider";
 
 type ChannelRow = { id: string; type: string; name: string | null; is_archived: boolean };
 type UnreadInfo = { unread: number; mentions: number };
@@ -90,59 +91,61 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   }
 
   return (
-    <div className="flex min-h-screen bg-gray-50">
-      <aside className="flex w-64 flex-col border-r border-gray-200 bg-white">
-        <div className="border-b border-gray-200 px-4 py-4">
-          <Link href="/" className="block text-lg font-semibold text-gray-900">
-            chat-app
-          </Link>
-        </div>
-
-        <nav className="flex-1 overflow-y-auto px-2 py-4 text-sm">
-          <ChannelSection title="パブリック" prefix="#" channels={publicChannels} />
-          <ChannelSection title="プライベート" prefix="#" channels={privateChannels} />
-          <DmSection dms={dms} />
-
-          <div className="mt-4 space-y-0.5 px-2">
-            <Link
-              href="/dm/new"
-              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-gray-600 hover:bg-gray-100"
-            >
-              <span className="text-lg leading-none">💬</span>
-              <span>新規 DM</span>
-            </Link>
-            <Link
-              href="/channels/browse"
-              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-gray-600 hover:bg-gray-100"
-            >
-              <span className="text-lg leading-none">🔍</span>
-              <span>チャンネルを探す</span>
-            </Link>
-            <Link
-              href="/channels/new"
-              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-gray-600 hover:bg-gray-100"
-            >
-              <span className="text-lg leading-none">+</span>
-              <span>チャンネルを作成</span>
+    <PresenceProvider userId={user.id}>
+      <div className="flex min-h-screen bg-gray-50">
+        <aside className="flex w-64 flex-col border-r border-gray-200 bg-white">
+          <div className="border-b border-gray-200 px-4 py-4">
+            <Link href="/" className="block text-lg font-semibold text-gray-900">
+              chat-app
             </Link>
           </div>
-        </nav>
 
-        <div className="border-t border-gray-200 px-4 py-3">
-          <p className="truncate text-xs text-gray-500">{user.email}</p>
-          <form action={signOut} className="mt-2">
-            <button
-              type="submit"
-              className="w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-            >
-              ログアウト
-            </button>
-          </form>
-        </div>
-      </aside>
+          <nav className="flex-1 overflow-y-auto px-2 py-4 text-sm">
+            <ChannelSection title="パブリック" prefix="#" channels={publicChannels} />
+            <ChannelSection title="プライベート" prefix="#" channels={privateChannels} />
+            <DmSection dms={dms} />
 
-      <main className="flex-1">{children}</main>
-    </div>
+            <div className="mt-4 space-y-0.5 px-2">
+              <Link
+                href="/dm/new"
+                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-gray-600 hover:bg-gray-100"
+              >
+                <span className="text-lg leading-none">💬</span>
+                <span>新規 DM</span>
+              </Link>
+              <Link
+                href="/channels/browse"
+                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-gray-600 hover:bg-gray-100"
+              >
+                <span className="text-lg leading-none">🔍</span>
+                <span>チャンネルを探す</span>
+              </Link>
+              <Link
+                href="/channels/new"
+                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-gray-600 hover:bg-gray-100"
+              >
+                <span className="text-lg leading-none">+</span>
+                <span>チャンネルを作成</span>
+              </Link>
+            </div>
+          </nav>
+
+          <div className="border-t border-gray-200 px-4 py-3">
+            <p className="truncate text-xs text-gray-500">{user.email}</p>
+            <form action={signOut} className="mt-2">
+              <button
+                type="submit"
+                className="w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
+                ログアウト
+              </button>
+            </form>
+          </div>
+        </aside>
+
+        <main className="flex-1">{children}</main>
+      </div>
+    </PresenceProvider>
   );
 }
 

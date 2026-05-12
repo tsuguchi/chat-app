@@ -11,6 +11,7 @@ import {
   type ActionResult,
 } from "./actions";
 import { MentionTextarea, type MentionableUser } from "./mention-textarea";
+import { OnlineDot } from "../../presence-provider";
 
 export type ChatProfile = { id: string; display_name: string; avatar_url: string | null };
 
@@ -446,8 +447,11 @@ function MessageRow({
   const isDeleted = !!message.deleted_at;
   return (
     <li className="group flex gap-3">
-      <div className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
-        {(profile?.display_name ?? "?").slice(0, 1).toUpperCase()}
+      <div className="relative flex-none">
+        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
+          {(profile?.display_name ?? "?").slice(0, 1).toUpperCase()}
+        </div>
+        <OnlineDot userId={message.user_id} className="absolute bottom-0 right-0" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
@@ -1130,8 +1134,11 @@ function ThreadMessage({
     <li
       className={`group flex gap-3 ${emphasize ? "rounded-md border border-blue-100 bg-blue-50 p-2" : ""}`}
     >
-      <div className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
-        {(profile?.display_name ?? "?").slice(0, 1).toUpperCase()}
+      <div className="relative flex-none">
+        <div className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-800">
+          {(profile?.display_name ?? "?").slice(0, 1).toUpperCase()}
+        </div>
+        <OnlineDot userId={message.user_id} className="absolute bottom-0 right-0" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
