@@ -22,13 +22,23 @@ function parseMentions(body: string): ParsedMention[] {
   return out;
 }
 
+export type AttachmentPayload = {
+  storage_path: string;
+  file_name: string;
+  mime_type: string | null;
+  size_bytes: number;
+};
+
 export async function sendMessage(
   channelId: string,
   body: string,
   parentMessageId: string | null = null,
+  attachments: AttachmentPayload[] = [],
 ): Promise<SendMessageResult> {
   const text = body.trim();
-  if (!text) return { ok: false, error: "メッセージを入力してください。" };
+  if (!text && attachments.length === 0) {
+    return { ok: false, error: "メッセージまたは添付ファイルが必要です。" };
+  }
   if (text.length > 4000) return { ok: false, error: "メッセージが長すぎます (4000文字まで)。" };
 
   const supabase = await createClient();
@@ -43,12 +53,25 @@ export async function sendMessage(
       channel_id: channelId,
       user_id: user.id,
       parent_message_id: parentMessageId,
-      body: text,
+      body: text || "",
     })
     .select("id")
     .single();
 
   if (insertErr) return { ok: false, error: insertErr.message };
+
+  // Attach files that the client uploaded to storage.
+  if (attachments.length > 0) {
+    const attachmentRows = attachments.map((a) => ({
+      message_id: newMessage.id,
+      storage_path: a.storage_path,
+      file_name: a.file_name,
+      mime_type: a.mime_type,
+      size_bytes: a.size_bytes,
+    }));
+    const { error: attachErr } = await supabase.from("message_attachments").insert(attachmentRows);
+    if (attachErr) return { ok: false, error: attachErr.message };
+  }
 
   // Resolve mention targets into concrete (mentioned_user_id, mention_type)
   // rows. Wrong usernames are silently dropped so the message still posts.

@@ -19,6 +19,19 @@ export type ReactionRow = { message_id: string; user_id: string; emoji: string }
 type ReactionSummary = { emoji: string; count: number; hasMine: boolean };
 type ReactionsByMessage = Map<string, ReactionRow[]>;
 
+export type ChatAttachment = {
+  id: string;
+  message_id: string;
+  storage_path: string;
+  file_name: string;
+  mime_type: string | null;
+  size_bytes: number | null;
+  signed_url: string;
+};
+type AttachmentsByMessage = Map<string, ChatAttachment[]>;
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+
 export type { MentionableUser };
 
 const COMMON_EMOJIS = ["👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉", "🚀", "👀", "✅", "❌"];
@@ -29,9 +42,36 @@ type Props = {
   initialProfiles: ChatProfile[];
   initialReplyCounts: Record<string, number>;
   initialReactions: ReactionRow[];
+  initialAttachments: ChatAttachment[];
   mentionableUsers: MentionableUser[];
   currentUserId: string;
 };
+
+function buildAttachmentMap(rows: ChatAttachment[]): AttachmentsByMessage {
+  const map: AttachmentsByMessage = new Map();
+  for (const a of rows) {
+    const list = map.get(a.message_id) ?? [];
+    list.push(a);
+    map.set(a.message_id, list);
+  }
+  return map;
+}
+
+function formatBytes(n: number | null | undefined): string {
+  if (!n || n <= 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+function isImage(mime: string | null | undefined): boolean {
+  return !!mime && mime.startsWith("image/");
+}
 
 function buildReactionMap(rows: ReactionRow[]): ReactionsByMessage {
   const map: ReactionsByMessage = new Map();
@@ -66,6 +106,7 @@ export function MessageStream({
   initialProfiles,
   initialReplyCounts,
   initialReactions,
+  initialAttachments,
   mentionableUsers,
   currentUserId,
 }: Props) {
@@ -84,17 +125,23 @@ export function MessageStream({
     buildReactionMap(initialReactions),
   );
 
+  const [attachments, setAttachments] = useState<AttachmentsByMessage>(() =>
+    buildAttachmentMap(initialAttachments),
+  );
+
   const [threadParentId, setThreadParentId] = useState<string | null>(null);
 
   // Stable client. createBrowserClient is a singleton; useMemo avoids tearing
   // the subscription down on every render.
   const supabase = useMemo(() => createClient(), []);
 
-  // Realtime subscription: route INSERTs to main list, reply counts, and/or
-  // the open thread panel based on parent_message_id.
+  // Realtime: one channel per table. Bundling multiple `postgres_changes`
+  // listeners on a single channel started dropping deliveries once we hit
+  // four — splitting them into separate channels keeps each subscription
+  // independent and reliable.
   useEffect(() => {
     let cancelled = false;
-    let channel: ReturnType<typeof supabase.channel> | null = null;
+    const channels: Array<ReturnType<typeof supabase.channel>> = [];
 
     (async () => {
       const {
@@ -105,8 +152,8 @@ export function MessageStream({
         await supabase.realtime.setAuth(session.access_token);
       }
 
-      channel = supabase
-        .channel(`messages:channel:${channelId}`)
+      const messagesChannel = supabase
+        .channel(`channel-${channelId}-messages`)
         .on(
           "postgres_changes",
           {
@@ -118,17 +165,14 @@ export function MessageStream({
           async (payload) => {
             const row = payload.new as ChatMessage;
             if (row.parent_message_id) {
-              // Reply: bump reply count.
               setReplyCounts((prev) => ({
                 ...prev,
                 [row.parent_message_id!]: (prev[row.parent_message_id!] ?? 0) + 1,
               }));
             } else {
-              // Top-level: append to main list (dedupe).
               setMessages((prev) => (prev.some((m) => m.id === row.id) ? prev : [...prev, row]));
             }
 
-            // Lazy-load author profile if unknown.
             if (!profilesRef.current.has(row.user_id)) {
               const { data: prof } = await supabase
                 .from("profiles")
@@ -141,6 +185,19 @@ export function MessageStream({
             }
           },
         )
+        .subscribe((status, err) => {
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            console.warn("[realtime] messages channel:", status, err ?? "");
+          }
+        });
+      channels.push(messagesChannel);
+
+      // Bundle reactions + attachments into one channel; the messages channel
+      // stays separate so its channel_id=eq.<id> filter can be applied at the
+      // server. Empirically two channels behaves better than three at this
+      // client's volume.
+      const sideChannel = supabase
+        .channel(`channel-${channelId}-side`)
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "message_reactions" },
@@ -175,12 +232,45 @@ export function MessageStream({
             });
           },
         )
-        .subscribe();
+        .on(
+          "postgres_changes",
+          { event: "INSERT", schema: "public", table: "message_attachments" },
+          async (payload) => {
+            const row = payload.new as {
+              id: string;
+              message_id: string;
+              storage_path: string;
+              file_name: string;
+              mime_type: string | null;
+              size_bytes: number | null;
+            };
+            const { data: signed } = await supabase.storage
+              .from("attachments")
+              .createSignedUrl(row.storage_path, 3600);
+            const att: ChatAttachment = {
+              ...row,
+              signed_url: signed?.signedUrl ?? "",
+            };
+            setAttachments((prev) => {
+              const list = prev.get(row.message_id) ?? [];
+              if (list.some((x) => x.id === att.id)) return prev;
+              const next = new Map(prev);
+              next.set(row.message_id, [...list, att]);
+              return next;
+            });
+          },
+        )
+        .subscribe((status, err) => {
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            console.warn("[realtime] side channel:", status, err ?? "");
+          }
+        });
+      channels.push(sideChannel);
     })();
 
     return () => {
       cancelled = true;
-      if (channel) supabase.removeChannel(channel);
+      for (const c of channels) supabase.removeChannel(c);
     };
   }, [channelId, supabase]);
 
@@ -222,6 +312,7 @@ export function MessageStream({
           profiles={profiles}
           replyCounts={replyCounts}
           reactions={reactions}
+          attachments={attachments}
           currentUserId={currentUserId}
           onOpenThread={openThread}
           onToggleReaction={toggleReaction}
@@ -230,6 +321,7 @@ export function MessageStream({
           channelId={channelId}
           parentMessageId={null}
           mentionableUsers={mentionableUsers}
+          supabase={supabase}
           placeholder="メッセージを入力 (@ でメンション、Enter で送信、Shift+Enter で改行)"
         />
       </div>
@@ -243,6 +335,7 @@ export function MessageStream({
           setProfiles={setProfiles}
           mentionableUsers={mentionableUsers}
           reactions={reactions}
+          attachments={attachments}
           currentUserId={currentUserId}
           onClose={closeThread}
           onToggleReaction={toggleReaction}
@@ -257,6 +350,7 @@ function MessageList({
   profiles,
   replyCounts,
   reactions,
+  attachments,
   currentUserId,
   onOpenThread,
   onToggleReaction,
@@ -265,6 +359,7 @@ function MessageList({
   profiles: Map<string, ChatProfile>;
   replyCounts: Record<string, number>;
   reactions: ReactionsByMessage;
+  attachments: AttachmentsByMessage;
   currentUserId: string;
   onOpenThread: (parentId: string) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
@@ -290,6 +385,7 @@ function MessageList({
               isMine={m.user_id === currentUserId}
               replyCount={replyCounts[m.id] ?? 0}
               reactionSummary={summarizeReactions(reactions.get(m.id), currentUserId)}
+              attachments={attachments.get(m.id) ?? []}
               onReply={() => onOpenThread(m.id)}
               onToggleReaction={(emoji) => onToggleReaction(m.id, emoji)}
             />
@@ -307,6 +403,7 @@ function MessageRow({
   isMine,
   replyCount,
   reactionSummary,
+  attachments,
   onReply,
   onToggleReaction,
 }: {
@@ -315,6 +412,7 @@ function MessageRow({
   isMine: boolean;
   replyCount: number;
   reactionSummary: ReactionSummary[];
+  attachments: ChatAttachment[];
   onReply: () => void;
   onToggleReaction: (emoji: string) => void;
 }) {
@@ -336,7 +434,8 @@ function MessageRow({
             })}
           </time>
         </div>
-        <MessageBody body={message.body} />
+        {message.body && <MessageBody body={message.body} />}
+        <AttachmentList attachments={attachments} />
         <ReactionBar summary={reactionSummary} onToggle={onToggleReaction} alwaysShowAdd={false} />
         <div className="mt-1 flex items-center gap-3 text-xs">
           <button
@@ -425,35 +524,93 @@ function ReactionBar({
   );
 }
 
+type BrowserClient = ReturnType<typeof createClient>;
+
 function Composer({
   channelId,
   parentMessageId,
   mentionableUsers,
+  supabase,
   placeholder,
 }: {
   channelId: string;
   parentMessageId: string | null;
   mentionableUsers: MentionableUser[];
+  supabase: BrowserClient;
   placeholder: string;
 }) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function addFiles(picked: FileList | null) {
+    if (!picked) return;
+    const added: File[] = [];
+    for (const f of Array.from(picked)) {
+      if (f.size > MAX_FILE_SIZE) {
+        setError(`「${f.name}」は 10MB を超えています。`);
+        continue;
+      }
+      added.push(f);
+    }
+    if (added.length > 0) {
+      setFiles((prev) => [...prev, ...added]);
+      setError(null);
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function removeFile(index: number) {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  const canSend = !sending && (draft.trim().length > 0 || files.length > 0);
 
   const submit = useCallback(async () => {
     if (sending) return;
-    const body = draft;
-    if (!body.trim()) return;
+    if (!draft.trim() && files.length === 0) return;
     setSending(true);
     setError(null);
-    const result = await sendMessage(channelId, body, parentMessageId);
+
+    // Upload files first; the path encodes the channel so storage RLS can
+    // validate membership without a separate lookup.
+    const uploaded: {
+      storage_path: string;
+      file_name: string;
+      mime_type: string | null;
+      size_bytes: number;
+    }[] = [];
+    for (const file of files) {
+      const uuid = crypto.randomUUID();
+      const safeName = file.name.replace(/[^\w.\-]+/g, "_");
+      const path = `${channelId}/${uuid}/${safeName}`;
+      const { error: upErr } = await supabase.storage
+        .from("attachments")
+        .upload(path, file, { cacheControl: "3600", upsert: false, contentType: file.type });
+      if (upErr) {
+        setError(`アップロード失敗: ${upErr.message}`);
+        setSending(false);
+        return;
+      }
+      uploaded.push({
+        storage_path: path,
+        file_name: file.name,
+        mime_type: file.type || null,
+        size_bytes: file.size,
+      });
+    }
+
+    const result = await sendMessage(channelId, draft, parentMessageId, uploaded);
     setSending(false);
     if (result.ok) {
       setDraft("");
+      setFiles([]);
     } else {
       setError(result.error);
     }
-  }, [channelId, draft, parentMessageId, sending]);
+  }, [channelId, draft, files, parentMessageId, sending, supabase]);
 
   return (
     <div className="border-t border-gray-200 bg-white px-4 py-3">
@@ -462,7 +619,45 @@ function Composer({
           {error}
         </div>
       )}
+      {files.length > 0 && (
+        <ul className="mb-2 flex flex-wrap gap-2">
+          {files.map((f, i) => (
+            <li
+              key={`${f.name}-${i}`}
+              className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-700"
+            >
+              <span className="truncate max-w-[12rem]">{f.name}</span>
+              <span className="text-gray-400">{formatBytes(f.size)}</span>
+              <button
+                type="button"
+                onClick={() => removeFile(i)}
+                className="text-gray-400 hover:text-red-600"
+                aria-label="削除"
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="flex items-end gap-2">
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={sending}
+          className="flex h-9 w-9 flex-none items-center justify-center rounded-md border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+          aria-label="ファイルを添付"
+          title="ファイルを添付"
+        >
+          📎
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          onChange={(e) => addFiles(e.target.files)}
+          className="hidden"
+        />
         <MentionTextarea
           value={draft}
           onChange={setDraft}
@@ -476,13 +671,63 @@ function Composer({
         <button
           type="button"
           onClick={submit}
-          disabled={sending || !draft.trim()}
+          disabled={!canSend}
           className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
         >
-          送信
+          {sending ? "送信中..." : "送信"}
         </button>
       </div>
     </div>
+  );
+}
+
+function AttachmentList({ attachments }: { attachments: ChatAttachment[] }) {
+  if (attachments.length === 0) return null;
+  return (
+    <ul className="mt-2 flex flex-col gap-2">
+      {attachments.map((a) =>
+        isImage(a.mime_type) && a.signed_url ? (
+          <li key={a.id}>
+            <a href={a.signed_url} target="_blank" rel="noopener noreferrer">
+              {/* Signed URLs change every hour, so next/image's loader does
+                  not help. Using a plain <img> is intentional here. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={a.signed_url}
+                alt={a.file_name}
+                className="max-h-80 max-w-md rounded-md border border-gray-200 object-contain"
+              />
+            </a>
+            <p className="mt-0.5 text-xs text-gray-500">
+              {a.file_name} {a.size_bytes ? `· ${formatBytes(a.size_bytes)}` : ""}
+            </p>
+          </li>
+        ) : (
+          <li
+            key={a.id}
+            className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm"
+          >
+            <span className="text-lg">📄</span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-gray-900">{a.file_name}</p>
+              <p className="text-xs text-gray-500">
+                {a.mime_type ?? "unknown"} · {formatBytes(a.size_bytes ?? 0)}
+              </p>
+            </div>
+            {a.signed_url && (
+              <a
+                href={a.signed_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs font-medium text-blue-600 hover:underline"
+              >
+                ダウンロード
+              </a>
+            )}
+          </li>
+        ),
+      )}
+    </ul>
   );
 }
 
@@ -528,6 +773,7 @@ function ThreadPanel({
   setProfiles,
   mentionableUsers,
   reactions,
+  attachments,
   currentUserId,
   onClose,
   onToggleReaction,
@@ -538,6 +784,7 @@ function ThreadPanel({
   setProfiles: React.Dispatch<React.SetStateAction<Map<string, ChatProfile>>>;
   mentionableUsers: MentionableUser[];
   reactions: ReactionsByMessage;
+  attachments: AttachmentsByMessage;
   currentUserId: string;
   onClose: () => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
@@ -660,6 +907,7 @@ function ThreadPanel({
               profile={profiles.get(parent.user_id) ?? null}
               isMine={parent.user_id === currentUserId}
               reactionSummary={summarizeReactions(reactions.get(parent.id), currentUserId)}
+              attachments={attachments.get(parent.id) ?? []}
               onToggleReaction={(emoji) => onToggleReaction(parent.id, emoji)}
               emphasize
             />
@@ -678,6 +926,7 @@ function ThreadPanel({
                   profile={profiles.get(m.user_id) ?? null}
                   isMine={m.user_id === currentUserId}
                   reactionSummary={summarizeReactions(reactions.get(m.id), currentUserId)}
+                  attachments={attachments.get(m.id) ?? []}
                   onToggleReaction={(emoji) => onToggleReaction(m.id, emoji)}
                 />
               ))}
@@ -690,6 +939,7 @@ function ThreadPanel({
         channelId={channelId}
         parentMessageId={parentId}
         mentionableUsers={mentionableUsers}
+        supabase={supabase}
         placeholder="スレッドに返信 (@ でメンション)"
       />
     </aside>
@@ -701,6 +951,7 @@ function ThreadMessage({
   profile,
   isMine,
   reactionSummary,
+  attachments,
   onToggleReaction,
   emphasize = false,
 }: {
@@ -708,6 +959,7 @@ function ThreadMessage({
   profile: ChatProfile | null;
   isMine: boolean;
   reactionSummary: ReactionSummary[];
+  attachments: ChatAttachment[];
   onToggleReaction: (emoji: string) => void;
   emphasize?: boolean;
 }) {
@@ -731,7 +983,8 @@ function ThreadMessage({
             })}
           </time>
         </div>
-        <MessageBody body={message.body} />
+        {message.body && <MessageBody body={message.body} />}
+        <AttachmentList attachments={attachments} />
         <ReactionBar summary={reactionSummary} onToggle={onToggleReaction} alwaysShowAdd={false} />
       </div>
     </li>
