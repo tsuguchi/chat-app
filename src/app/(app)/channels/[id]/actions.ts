@@ -212,3 +212,28 @@ export async function softDeleteMessage(messageId: string): Promise<ActionResult
   if (error) return { ok: false, error: error.message };
   return { ok: true };
 }
+
+export type NotificationSetting = "all" | "mentions" | "none";
+
+export async function updateNotificationSetting(
+  channelId: string,
+  setting: NotificationSetting,
+): Promise<ActionResult> {
+  if (!["all", "mentions", "none"].includes(setting)) {
+    return { ok: false, error: "不正な通知設定です。" };
+  }
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "ログインが切れています。" };
+
+  const { error } = await supabase
+    .from("channel_members")
+    .update({ notification_setting: setting })
+    .eq("channel_id", channelId)
+    .eq("user_id", user.id);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
