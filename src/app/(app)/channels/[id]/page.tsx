@@ -9,6 +9,8 @@ import {
   type MentionableUser,
   type ReactionRow,
 } from "./message-stream";
+import { NotificationSelector } from "./notification-selector";
+import type { NotificationSetting } from "./actions";
 
 type Params = Promise<{ id: string }>;
 
@@ -35,12 +37,14 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
 
   const { data: membership } = await supabase
     .from("channel_members")
-    .select("user_id, role")
+    .select("user_id, role, notification_setting")
     .eq("channel_id", id)
     .eq("user_id", user.id)
     .maybeSingle();
   const isMember = membership !== null;
   const isChannelOwnerOrAdmin = membership?.role === "owner" || membership?.role === "admin";
+  const notificationSetting =
+    (membership?.notification_setting as NotificationSetting | undefined) ?? "all";
 
   // Workspace admin (profiles.role) can also invite to any private channel.
   let canInvite = false;
@@ -206,14 +210,17 @@ export default async function ChannelDetailPage({ params }: { params: Params }) 
             <h1 className="text-lg font-semibold text-gray-900">{headerTitle}</h1>
             <span className="text-xs text-gray-500">{headerSubtitle}</span>
           </div>
-          {canInvite && (
-            <Link
-              href={`/channels/${id}/invite`}
-              className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
-            >
-              + メンバーを招待
-            </Link>
-          )}
+          <div className="flex items-center gap-2">
+            {isMember && <NotificationSelector channelId={id} initial={notificationSetting} />}
+            {canInvite && (
+              <Link
+                href={`/channels/${id}/invite`}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
+                + メンバーを招待
+              </Link>
+            )}
+          </div>
         </div>
         {channel.description && <p className="mt-1 text-sm text-gray-600">{channel.description}</p>}
       </header>

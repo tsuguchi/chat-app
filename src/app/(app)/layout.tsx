@@ -6,8 +6,15 @@ import { PresenceProvider } from "./presence-provider";
 
 type ChannelRow = { id: string; type: string; name: string | null; is_archived: boolean };
 type UnreadInfo = { unread: number; mentions: number };
-type ChannelWithUnread = { id: string; type: string; name: string | null; unread: UnreadInfo };
-type DmWithUnread = { id: string; label: string; unread: UnreadInfo };
+type NotifSetting = "all" | "mentions" | "none";
+type ChannelWithUnread = {
+  id: string;
+  type: string;
+  name: string | null;
+  unread: UnreadInfo;
+  setting: NotifSetting;
+};
+type DmWithUnread = { id: string; label: string; unread: UnreadInfo; setting: NotifSetting };
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient();
@@ -21,8 +28,16 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   const { data: memberRows } = await supabase
     .from("channel_members")
-    .select("channel:channels!inner(id, type, name, is_archived)")
+    .select("notification_setting, channel:channels!inner(id, type, name, is_archived)")
     .eq("user_id", user.id);
+
+  const settingByChannel = new Map<string, NotifSetting>();
+  for (const r of memberRows ?? []) {
+    const ch = r.channel as unknown as ChannelRow | null;
+    if (ch?.id) {
+      settingByChannel.set(ch.id, (r.notification_setting as NotifSetting | null) ?? "all");
+    }
+  }
 
   const joined: ChannelRow[] = (memberRows ?? [])
     .map((r) => r.channel as unknown as ChannelRow)
@@ -46,6 +61,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     type: c.type,
     name: c.name,
     unread: unreadMap.get(c.id) ?? { unread: 0, mentions: 0 },
+    setting: settingByChannel.get(c.id) ?? "all",
   });
 
   const publicChannels = joined
@@ -86,6 +102,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         id: c.id,
         label: (byChannel.get(c.id) ?? []).join(", ") || "(自分のみ)",
         unread: unreadMap.get(c.id) ?? { unread: 0, mentions: 0 },
+        setting: settingByChannel.get(c.id) ?? "all",
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
   }
@@ -171,6 +188,7 @@ function ChannelSection({
               href={`/channels/${c.id}`}
               label={`${prefix} ${c.name}`}
               unread={c.unread}
+              setting={c.setting}
             />
           ))
         )}
@@ -193,6 +211,7 @@ function DmSection({ dms }: { dms: DmWithUnread[] }) {
               href={`/channels/${d.id}`}
               label={`💬 ${d.label}`}
               unread={d.unread}
+              setting={d.setting}
             />
           ))
         )}
@@ -201,23 +220,45 @@ function DmSection({ dms }: { dms: DmWithUnread[] }) {
   );
 }
 
-function SidebarItem({ href, label, unread }: { href: string; label: string; unread: UnreadInfo }) {
-  const hasUnread = unread.unread > 0;
-  const hasMention = unread.mentions > 0;
+function SidebarItem({
+  href,
+  label,
+  unread,
+  setting,
+}: {
+  href: string;
+  label: string;
+  unread: UnreadInfo;
+  setting: NotifSetting;
+}) {
+  // Mute settings filter what counts toward the badge:
+  //   "all"     — show mentions and unread as normal
+  //   "mentions"— only show the @-mention pill, never the unread pill
+  //   "none"    — fully muted; no pill, no bold name
+  const showUnread = setting === "all" && unread.unread > 0;
+  const showMention = setting !== "none" && unread.mentions > 0;
+  const muted = setting === "none";
   return (
     <li>
       <Link
         href={href}
         className={`flex items-center justify-between gap-2 rounded-md px-2 py-1 hover:bg-gray-100 ${
-          hasUnread ? "font-semibold text-gray-900" : "text-gray-700"
+          muted
+            ? "text-gray-400"
+            : showUnread || showMention
+              ? "font-semibold text-gray-900"
+              : "text-gray-700"
         }`}
       >
-        <span className="min-w-0 truncate">{label}</span>
-        {hasMention ? (
+        <span className="min-w-0 truncate">
+          {muted && <span className="mr-1 text-xs">🔕</span>}
+          {label}
+        </span>
+        {showMention ? (
           <span className="inline-flex h-5 min-w-5 flex-none items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold text-white">
             @{unread.mentions}
           </span>
-        ) : hasUnread ? (
+        ) : showUnread ? (
           <span className="inline-flex h-5 min-w-5 flex-none items-center justify-center rounded-full bg-gray-700 px-1 text-[10px] font-semibold text-white">
             {unread.unread}
           </span>
