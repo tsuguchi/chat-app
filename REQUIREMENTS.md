@@ -1,4 +1,4 @@
-# チャットアプリ 要件定義書 v1.1
+# チャットアプリ 要件定義書 v1.2
 
 ## 1. プロジェクト概要
 
@@ -9,13 +9,13 @@
 | 想定規模     | 〜50人 / 単一組織                    |
 | 利用形態     | 社内利用 (ブラウザ)                  |
 | 初版作成日   | 2026-05-11                           |
-| 改訂日       | 2026-05-12 (v1.1: 実装状況を反映)    |
+| 改訂日       | 2026-05-12 (v1.2: 認証をユーザー名+パスワードに変更、Vercel デプロイ完了) |
 
 ## 2. 実装状況サマリ
 
 | 機能                                                                 | PR      |     状況      |
 | -------------------------------------------------------------------- | ------- | :-----------: |
-| 認証（マジックリンク）                                               | #4      |      ✅       |
+| 認証（ユーザー名+パスワード / 自由サインアップ）                     | #4 / #22 |     ✅       |
 | チャンネル作成・参加・ブラウズ                                       | #5 / #7 |      ✅       |
 | メッセージ送受信 + Realtime                                          | #6      |      ✅       |
 | DM（1対1 / グループ）                                                | #8      |      ✅       |
@@ -56,7 +56,9 @@
 
 **ユーザー**
 
-- マジックリンク認証（パスワードレス、カスタム SMTP 経由）
+- ユーザー名 + パスワード認証（メール不要、誰でも `/signup` から登録可能）
+  - Supabase Auth は内部的に email+password を使用するため、`<username>@chat-app.local` という非ルーティングな架空メールを内部表現として使用
+  - `raw_user_meta_data.username` と `display_name` は `handle_new_user` トリガーが拾って `profiles` に保存
 - プロフィール（display_name, username, avatar_url, status_text）
 - プレゼンス（Realtime Presence、UI は緑ドット）
 
@@ -128,13 +130,13 @@
 | -------------- | -------------------------------------------------- |
 | フロントエンド | Next.js 16 (App Router, Turbopack) + TypeScript    |
 | UI             | Tailwind CSS v4                                    |
-| 認証           | Supabase Auth (Magic Link, カスタム SMTP)          |
+| 認証           | Supabase Auth (Email+Password, 架空メールでラップ) |
 | データベース   | Supabase PostgreSQL                                |
 | リアルタイム   | Supabase Realtime (postgres_changes + presence)    |
 | ストレージ     | Supabase Storage (`attachments` バケット, private) |
 | 検索           | pg_trgm + GIN インデックス                         |
-| ホスティング   | Vercel（未デプロイ）                               |
-| 通話           | LiveKit Cloud（未統合）                            |
+| ホスティング   | Vercel（デプロイ済み）                             |
+| 通話           | （スコープ外）                                     |
 
 > Next.js 16 は `middleware` → `proxy` の規約変更があります。`src/proxy.ts` を採用。
 
@@ -297,10 +299,15 @@ erDiagram
 
 ## 13. デプロイ
 
-未デプロイ。Vercel + Supabase Cloud 構成で予定。  
-本番化時には以下を追加で行う：
+Vercel + Supabase Cloud にデプロイ済み（本番URL: <https://chat-app-theta-seven-80.vercel.app>）。  
+完了している設定：
 
-- Supabase Dashboard → Authentication → URL Configuration に本番 URL を追加
+- Supabase Dashboard → Authentication → URL Configuration に本番 URL を登録
 - `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` を Vercel に登録
-- カスタム SMTP の `From` を本番ドメインに合わせて変更
-- カスタムドメインの DNS 設定（任意）
+- main ブランチへの push で自動デプロイ
+
+ユーザー名+パスワード認証への切替に伴う設定（v1.2 で追加）：
+
+- Supabase Dashboard → Authentication → Sign In / Up → **「Confirm email」をオフ** にして
+  架空メール (`<username>@chat-app.local`) でも即サインアップできるようにする
+- 旧マジックリンク用のカスタム SMTP は無効化または放置でよい（使用されない）
