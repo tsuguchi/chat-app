@@ -5,7 +5,13 @@ import { signOut } from "./actions";
 import { PresenceProvider } from "./presence-provider";
 import { SidebarSearchInput } from "./search-input";
 
-type ChannelRow = { id: string; type: string; name: string | null; is_archived: boolean };
+type ChannelRow = {
+  id: string;
+  type: string;
+  name: string | null;
+  is_archived: boolean;
+  created_at: string;
+};
 type UnreadInfo = { unread: number; mentions: number };
 type NotifSetting = "all" | "mentions" | "none";
 type ChannelWithUnread = {
@@ -29,7 +35,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   const { data: memberRows } = await supabase
     .from("channel_members")
-    .select("notification_setting, channel:channels!inner(id, type, name, is_archived)")
+    .select("notification_setting, channel:channels!inner(id, type, name, is_archived, created_at)")
     .eq("user_id", user.id);
 
   const settingByChannel = new Map<string, NotifSetting>();
@@ -65,13 +71,18 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     setting: settingByChannel.get(c.id) ?? "all",
   });
 
+  // Order by creation time ascending so newly created channels appear at
+  // the bottom of their section — matches the typical Discord/chronological
+  // mental model and gives a stable order across sessions.
+  const byCreatedAtAsc = (a: ChannelRow, b: ChannelRow) =>
+    a.created_at.localeCompare(b.created_at);
   const publicChannels = joined
     .filter((c) => c.type === "public")
-    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""))
+    .sort(byCreatedAtAsc)
     .map(attachUnread);
   const privateChannels = joined
     .filter((c) => c.type === "private")
-    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""))
+    .sort(byCreatedAtAsc)
     .map(attachUnread);
   const dmChannels = joined.filter((c) => c.type === "dm" || c.type === "group_dm");
 
