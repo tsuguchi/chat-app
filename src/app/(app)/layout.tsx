@@ -33,10 +33,22 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     redirect("/login");
   }
 
-  const { data: memberRows } = await supabase
-    .from("channel_members")
-    .select("notification_setting, channel:channels!inner(id, type, name, is_archived, created_at)")
-    .eq("user_id", user.id);
+  // The layout runs on every navigation, so parallelize the two
+  // user-scoped queries — they only need user.id and don't depend on each
+  // other. With Vercel/Supabase co-located in hnd1 this still matters
+  // because we're saving the second RTT.
+  const [memberRowsRes, unreadRowsRes] = await Promise.all([
+    supabase
+      .from("channel_members")
+      .select(
+        "notification_setting, channel:channels!inner(id, type, name, is_archived, created_at)",
+      )
+      .eq("user_id", user.id),
+    supabase.rpc("get_unread_summary", { _user_id: user.id }),
+  ]);
+
+  const memberRows = memberRowsRes.data;
+  const unreadRows = unreadRowsRes.data;
 
   const settingByChannel = new Map<string, NotifSetting>();
   for (const r of memberRows ?? []) {
@@ -50,9 +62,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     .map((r) => r.channel as unknown as ChannelRow)
     .filter((c) => !c.is_archived);
 
-  // Unread/mention counts per channel (one RPC call).
+  // Unread/mention counts per channel (RPC result from the parallel call above).
   const unreadMap = new Map<string, UnreadInfo>();
-  const { data: unreadRows } = await supabase.rpc("get_unread_summary", { _user_id: user.id });
   for (const r of (unreadRows ?? []) as Array<{
     channel_id: string;
     unread_count: number;
